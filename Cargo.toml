@@ -1,0 +1,8 @@
+[package]
+name = "rust-renderer-vk"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+ash="0.33.3"
+winit = "0.25.0"
