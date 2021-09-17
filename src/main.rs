@@ -1,3 +1,8 @@
+use std::ffi::CString;
+
+use ash::extensions::ext::DebugUtils;
+use ash::extensions::khr::{Surface, Win32Surface};
+use ash::vk::{self, ApplicationInfo, InstanceCreateInfo};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -5,11 +10,19 @@ const APP_TITLE: &str = "Rust Renderer VK";
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 
-struct HelloTriangleApplication {}
+struct HelloTriangleApplication {
+    _entry: ash::Entry,
+    instance: ash::Instance,
+}
 
 impl HelloTriangleApplication {
     pub fn initialize() -> Self {
-        Self {}
+        let entry = unsafe { ash::Entry::new().unwrap() };
+        let instance = HelloTriangleApplication::create_instance(&entry);
+        Self {
+            _entry: entry,
+            instance,
+        }
     }
 
     fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
@@ -20,7 +33,48 @@ impl HelloTriangleApplication {
             .expect("Failed to create window.")
     }
 
-    fn init_vulkan(&mut self) {}
+    fn create_instance(entry: &ash::Entry) -> ash::Instance {
+        let windows_required_extensions = vec![
+            Surface::name().as_ptr(),
+            Win32Surface::name().as_ptr(),
+            DebugUtils::name().as_ptr(),
+        ];
+
+        // Check available extensions
+        if let Ok(properties) = entry.enumerate_instance_extension_properties() {
+            properties
+                .iter()
+                .map(|property| {
+                    property
+                        .extension_name
+                        .iter()
+                        .map(|char| *char as u8)
+                        .collect()
+                })
+                .map(|name_raw| unsafe { CString::from_vec_unchecked(name_raw) })
+                .for_each(|name| println!("Loaded Vulkan extension [{}]", name.to_str().unwrap()));
+        };
+
+        let app_name = CString::new(APP_TITLE).unwrap();
+        let engine_name = CString::new("Name Pending").unwrap();
+        let app_info = ApplicationInfo::builder()
+            .application_name(&app_name)
+            .application_version(vk::make_api_version(0, 0, 0, 1))
+            .engine_name(&engine_name)
+            .engine_version(vk::make_api_version(0, 0, 0, 1))
+            .api_version(vk::API_VERSION_1_0)
+            .build();
+
+        let create_info = InstanceCreateInfo::builder()
+            .application_info(&app_info)
+            .enabled_extension_names(&windows_required_extensions[..]);
+
+        unsafe {
+            entry
+                .create_instance(&create_info, None)
+                .expect("Failed to create Vulkan instance")
+        }
+    }
 
     fn main_loop(&mut self, event_loop: EventLoop<()>) {
         event_loop.run(move |event, _, control_flow| {
@@ -54,12 +108,16 @@ impl HelloTriangleApplication {
         });
     }
 
-    fn cleanup(&mut self) {}
-
     fn run(&mut self, event_loop: EventLoop<()>) {
-        self.init_vulkan();
         self.main_loop(event_loop);
-        self.cleanup();
+    }
+}
+
+impl Drop for HelloTriangleApplication {
+    fn drop(&mut self) {
+        unsafe {
+            self.instance.destroy_instance(None);
+        }
     }
 }
 
