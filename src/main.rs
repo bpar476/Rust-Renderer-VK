@@ -62,9 +62,21 @@ fn read_vk_string(chars: &[c_char]) -> Result<String, FromUtf8Error> {
     String::from_utf8(content)
 }
 
+struct QueueFamilyIndices {
+    graphics_family: Option<u32>,
+}
+
+impl QueueFamilyIndices {
+    pub fn is_complete(&self) -> bool {
+        self.graphics_family.is_some()
+    }
+}
+
 struct HelloTriangleApplication {
     _entry: ash::Entry,
     instance: ash::Instance,
+    physical_device: ash::vk::PhysicalDevice,
+    queue_families: QueueFamilyIndices,
 
     debug_loader: Option<ash::extensions::ext::DebugUtils>,
     debug_messenger_ext: Option<vk::DebugUtilsMessengerEXT>,
@@ -83,14 +95,27 @@ impl HelloTriangleApplication {
             (None, None)
         };
 
+        let physical_device = match HelloTriangleApplication::pick_physical_device(&instance) {
+            Some(device) => device,
+            None => panic!("No suitable physical device"),
+        };
+
+        let queue_families =
+            HelloTriangleApplication::find_queue_families(&instance, &physical_device);
+
         Self {
             _entry: entry,
             instance,
             debug_loader,
             debug_messenger_ext,
+            physical_device,
+            queue_families,
         }
     }
 
+    /**
+    Instance creation
+    */
     fn create_instance(entry: &ash::Entry, debug: bool) -> ash::Instance {
         let extensions = HelloTriangleApplication::get_extensions(debug);
 
@@ -211,6 +236,9 @@ impl HelloTriangleApplication {
             .build()
     }
 
+    /**
+    Debug Utils validation layer
+    */
     fn create_debug_messenger(
         entry: &ash::Entry,
         instance: &ash::Instance,
@@ -229,6 +257,78 @@ impl HelloTriangleApplication {
         (debug_utils_loader, messenger)
     }
 
+    /**
+    Physical Device
+    */
+    fn pick_physical_device(instance: &ash::Instance) -> Option<vk::PhysicalDevice> {
+        let devices = unsafe { instance.enumerate_physical_devices() };
+
+        match devices {
+            Ok(devices) => {
+                if devices.len() == 0 {
+                    None
+                } else {
+                    println!("Found {} devices", devices.len());
+                    // TODO confirm device name in use
+                    if let Some(device) = devices.iter().find(|&device| {
+                        HelloTriangleApplication::is_device_suitable(instance, device)
+                    }) {
+                        Some(*device)
+                    } else {
+                        None
+                    }
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn is_device_suitable(instance: &ash::Instance, device: &vk::PhysicalDevice) -> bool {
+        let properties = unsafe { instance.get_physical_device_properties(*device) };
+        let features = unsafe { instance.get_physical_device_features(*device) };
+
+        println!(
+            "Evaluating suitability of device [{}]",
+            read_vk_string(&properties.device_name[..]).unwrap()
+        );
+
+        let supports_required_families =
+            HelloTriangleApplication::find_queue_families(instance, device).is_complete();
+
+        properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
+            && features.geometry_shader == 1
+            && supports_required_families
+    }
+
+    /**
+    Queue Families
+    */
+    fn find_queue_families(
+        instance: &ash::Instance,
+        device: &vk::PhysicalDevice,
+    ) -> QueueFamilyIndices {
+        let mut indices = QueueFamilyIndices {
+            graphics_family: None,
+        };
+
+        let properties = unsafe { instance.get_physical_device_queue_family_properties(*device) };
+
+        for (i, family) in properties.iter().enumerate() {
+            if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                indices.graphics_family = Some(i as u32);
+            }
+
+            if indices.is_complete() {
+                break;
+            }
+        }
+
+        indices
+    }
+
+    /**
+    Main loop
+    */
     fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
         winit::window::WindowBuilder::new()
             .with_title(APP_TITLE)
