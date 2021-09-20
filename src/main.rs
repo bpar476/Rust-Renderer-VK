@@ -77,6 +77,8 @@ struct HelloTriangleApplication {
     instance: ash::Instance,
     physical_device: ash::vk::PhysicalDevice,
     queue_families: QueueFamilyIndices,
+    logical_device: ash::Device,
+    graphics_queue: vk::Queue,
 
     debug_loader: Option<ash::extensions::ext::DebugUtils>,
     debug_messenger_ext: Option<vk::DebugUtilsMessengerEXT>,
@@ -103,6 +105,16 @@ impl HelloTriangleApplication {
         let queue_families =
             HelloTriangleApplication::find_queue_families(&instance, &physical_device);
 
+        let logical_device = HelloTriangleApplication::create_logical_device(
+            &instance,
+            &physical_device,
+            &queue_families,
+            debug,
+        );
+
+        let graphics_queue =
+            HelloTriangleApplication::create_graphics_queue(&logical_device, &queue_families);
+
         Self {
             _entry: entry,
             instance,
@@ -110,6 +122,8 @@ impl HelloTriangleApplication {
             debug_messenger_ext,
             physical_device,
             queue_families,
+            logical_device,
+            graphics_queue,
         }
     }
 
@@ -134,12 +148,11 @@ impl HelloTriangleApplication {
         if debug {
             HelloTriangleApplication::assert_required_validation_layers_available(&entry)
         };
-
         let required_validation_layer_raw_names: Vec<CString> = VALIDATION_LAYERS
             .iter()
             .map(|layer_name| CString::new(*layer_name).unwrap())
             .collect();
-        let enabled_layers: Vec<*const i8> = required_validation_layer_raw_names
+        let validation_layers: Vec<*const c_char> = required_validation_layer_raw_names
             .iter()
             .map(|layer_name| layer_name.as_ptr())
             .collect();
@@ -165,7 +178,7 @@ impl HelloTriangleApplication {
 
             InstanceCreateInfo::builder()
                 .application_info(&app_info)
-                .enabled_layer_names(&enabled_layers[..])
+                .enabled_layer_names(&validation_layers[..])
                 .enabled_extension_names(&extensions[..])
                 .push_next(&mut debug_utils_create_info)
         } else {
@@ -327,6 +340,70 @@ impl HelloTriangleApplication {
     }
 
     /**
+     * Logical device
+     */
+    fn create_logical_device(
+        instance: &ash::Instance,
+        physical_device: &vk::PhysicalDevice,
+        queue_indices: &QueueFamilyIndices,
+        debug: bool,
+    ) -> ash::Device {
+        let queue_create_info = vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(
+                queue_indices
+                    .graphics_family
+                    .expect("Graphics queue family index"),
+            )
+            .queue_priorities(&[1.0])
+            .build();
+        let device_features = vk::PhysicalDeviceFeatures::builder().build();
+
+        let create_infos = &[queue_create_info];
+        let required_validation_layer_raw_names: Vec<CString> = VALIDATION_LAYERS
+            .iter()
+            .map(|layer_name| CString::new(*layer_name).unwrap())
+            .collect();
+        let validation_layers: Vec<*const c_char> = required_validation_layer_raw_names
+            .iter()
+            .map(|layer_name| layer_name.as_ptr())
+            .collect();
+        let device_create_info = if debug {
+            vk::DeviceCreateInfo::builder()
+                .queue_create_infos(create_infos)
+                .enabled_features(&device_features)
+                .enabled_layer_names(&validation_layers[..])
+        } else {
+            vk::DeviceCreateInfo::builder()
+                .queue_create_infos(create_infos)
+                .enabled_features(&device_features)
+        };
+
+        unsafe {
+            match instance.create_device(*physical_device, &device_create_info, None) {
+                Ok(device) => device,
+                _ => panic!("Logical device creation"),
+            }
+        }
+    }
+
+    /**
+     * Queues
+     */
+    fn create_graphics_queue(
+        logical_device: &ash::Device,
+        indices: &QueueFamilyIndices,
+    ) -> vk::Queue {
+        unsafe {
+            logical_device.get_device_queue(
+                indices
+                    .graphics_family
+                    .expect("Graphics family queue index"),
+                0,
+            )
+        }
+    }
+
+    /**
     Main loop
     */
     fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
@@ -393,6 +470,7 @@ impl Drop for HelloTriangleApplication {
             {
                 loader.destroy_debug_utils_messenger(messenger, None)
             }
+            self.logical_device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
     }
