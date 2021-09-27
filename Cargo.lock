@@ -736,6 +736,7 @@ name = "rust-renderer-vk"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "winapi",
  "winit",
 ]
 

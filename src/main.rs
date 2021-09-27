@@ -6,7 +6,7 @@ use std::string::FromUtf8Error;
 
 use ash::extensions::ext::DebugUtils;
 use ash::extensions::khr::{Surface, Win32Surface};
-use ash::vk::{self, ApplicationInfo, InstanceCreateInfo};
+use ash::vk::{self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
@@ -64,28 +64,32 @@ fn read_vk_string(chars: &[c_char]) -> Result<String, FromUtf8Error> {
 
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
+    present_family: Option<u32>,
 }
 
 impl QueueFamilyIndices {
     pub fn is_complete(&self) -> bool {
-        self.graphics_family.is_some()
+        self.graphics_family.is_some() && self.present_family.is_some()
     }
 }
 
 struct HelloTriangleApplication {
     _entry: ash::Entry,
     instance: ash::Instance,
+    surface: vk::SurfaceKHR,
+    surface_loader: ash::extensions::khr::Surface,
     physical_device: ash::vk::PhysicalDevice,
     queue_families: QueueFamilyIndices,
     logical_device: ash::Device,
     graphics_queue: vk::Queue,
+    present_queue: vk::Queue,
 
     debug_loader: Option<ash::extensions::ext::DebugUtils>,
     debug_messenger_ext: Option<vk::DebugUtilsMessengerEXT>,
 }
 
 impl HelloTriangleApplication {
-    pub fn initialize(debug: bool) -> Self {
+    pub fn initialize(window: &winit::window::Window, debug: bool) -> Self {
         let entry = unsafe { ash::Entry::new().unwrap() };
         let instance = HelloTriangleApplication::create_instance(&entry, debug);
 
@@ -97,13 +101,25 @@ impl HelloTriangleApplication {
             (None, None)
         };
 
-        let physical_device = match HelloTriangleApplication::pick_physical_device(&instance) {
+        // We need a handle to the surface loader so we can call the extension functions
+        let (surface_loader, surface) =
+            HelloTriangleApplication::create_win32_surface(&entry, &instance, window);
+
+        let physical_device = match HelloTriangleApplication::pick_physical_device(
+            &instance,
+            &surface_loader,
+            &surface,
+        ) {
             Some(device) => device,
             None => panic!("No suitable physical device"),
         };
 
-        let queue_families =
-            HelloTriangleApplication::find_queue_families(&instance, &physical_device);
+        let queue_families = HelloTriangleApplication::find_queue_families(
+            &instance,
+            &physical_device,
+            &surface_loader,
+            &surface,
+        );
 
         let logical_device = HelloTriangleApplication::create_logical_device(
             &instance,
@@ -112,18 +128,31 @@ impl HelloTriangleApplication {
             debug,
         );
 
-        let graphics_queue =
-            HelloTriangleApplication::create_graphics_queue(&logical_device, &queue_families);
+        let graphics_queue = HelloTriangleApplication::get_device_queue(
+            &logical_device,
+            queue_families
+                .graphics_family
+                .expect("Graphics queue family index"),
+        );
+        let present_queue = HelloTriangleApplication::get_device_queue(
+            &logical_device,
+            queue_families
+                .present_family
+                .expect("Present queue family index"),
+        );
 
         Self {
             _entry: entry,
             instance,
             debug_loader,
             debug_messenger_ext,
+            surface,
+            surface_loader,
             physical_device,
             queue_families,
             logical_device,
             graphics_queue,
+            present_queue,
         }
     }
 
@@ -273,7 +302,11 @@ impl HelloTriangleApplication {
     /**
     Physical Device
     */
-    fn pick_physical_device(instance: &ash::Instance) -> Option<vk::PhysicalDevice> {
+    fn pick_physical_device(
+        instance: &ash::Instance,
+        surface_loader: &ash::extensions::khr::Surface,
+        surface: &vk::SurfaceKHR,
+    ) -> Option<vk::PhysicalDevice> {
         let devices = unsafe { instance.enumerate_physical_devices() };
 
         match devices {
@@ -284,7 +317,12 @@ impl HelloTriangleApplication {
                     println!("Found {} devices", devices.len());
                     // TODO confirm device name in use
                     if let Some(device) = devices.iter().find(|&device| {
-                        HelloTriangleApplication::is_device_suitable(instance, device)
+                        HelloTriangleApplication::is_device_suitable(
+                            instance,
+                            device,
+                            surface_loader,
+                            surface,
+                        )
                     }) {
                         Some(*device)
                     } else {
@@ -296,7 +334,12 @@ impl HelloTriangleApplication {
         }
     }
 
-    fn is_device_suitable(instance: &ash::Instance, device: &vk::PhysicalDevice) -> bool {
+    fn is_device_suitable(
+        instance: &ash::Instance,
+        device: &vk::PhysicalDevice,
+        surface_loader: &ash::extensions::khr::Surface,
+        surface: &vk::SurfaceKHR,
+    ) -> bool {
         let properties = unsafe { instance.get_physical_device_properties(*device) };
         let features = unsafe { instance.get_physical_device_features(*device) };
 
@@ -305,8 +348,13 @@ impl HelloTriangleApplication {
             read_vk_string(&properties.device_name[..]).unwrap()
         );
 
-        let supports_required_families =
-            HelloTriangleApplication::find_queue_families(instance, device).is_complete();
+        let supports_required_families = HelloTriangleApplication::find_queue_families(
+            instance,
+            device,
+            surface_loader,
+            surface,
+        )
+        .is_complete();
 
         properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
             && features.geometry_shader == 1
@@ -319,16 +367,29 @@ impl HelloTriangleApplication {
     fn find_queue_families(
         instance: &ash::Instance,
         device: &vk::PhysicalDevice,
+        surface_loader: &ash::extensions::khr::Surface,
+        surface: &vk::SurfaceKHR,
     ) -> QueueFamilyIndices {
         let mut indices = QueueFamilyIndices {
             graphics_family: None,
+            present_family: None,
         };
 
         let properties = unsafe { instance.get_physical_device_queue_family_properties(*device) };
 
         for (i, family) in properties.iter().enumerate() {
-            if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+            if family.queue_count > 0 && family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 indices.graphics_family = Some(i as u32);
+            }
+
+            let is_present_support = unsafe {
+                surface_loader
+                    .get_physical_device_surface_support(*device, i as u32, *surface)
+                    .expect("Get physical device surface support")
+            };
+
+            if family.queue_count > 0 && is_present_support {
+                indices.present_family = Some(i as u32)
             }
 
             if indices.is_complete() {
@@ -348,17 +409,25 @@ impl HelloTriangleApplication {
         queue_indices: &QueueFamilyIndices,
         debug: bool,
     ) -> ash::Device {
-        let queue_create_info = vk::DeviceQueueCreateInfo::builder()
-            .queue_family_index(
-                queue_indices
-                    .graphics_family
-                    .expect("Graphics queue family index"),
+        let mut queue_create_infos: Vec<DeviceQueueCreateInfo> = vec![];
+
+        // Use a set to remove duplicate queue indices. It is illegal to request a queue created with the same queue index multiple times
+        use std::collections::HashSet;
+        let mut unique_queue_families = HashSet::new();
+        unique_queue_families.insert(queue_indices.graphics_family.unwrap());
+        unique_queue_families.insert(queue_indices.present_family.unwrap());
+
+        for index in unique_queue_families.iter() {
+            queue_create_infos.push(
+                vk::DeviceQueueCreateInfo::builder()
+                    .queue_family_index(*index)
+                    .queue_priorities(&[1.0])
+                    .build(),
             )
-            .queue_priorities(&[1.0])
-            .build();
+        }
         let device_features = vk::PhysicalDeviceFeatures::builder().build();
 
-        let create_infos = &[queue_create_info];
+        let create_infos = &queue_create_infos[..];
         let required_validation_layer_raw_names: Vec<CString> = VALIDATION_LAYERS
             .iter()
             .map(|layer_name| CString::new(*layer_name).unwrap())
@@ -389,18 +458,36 @@ impl HelloTriangleApplication {
     /**
      * Queues
      */
-    fn create_graphics_queue(
-        logical_device: &ash::Device,
-        indices: &QueueFamilyIndices,
-    ) -> vk::Queue {
-        unsafe {
-            logical_device.get_device_queue(
-                indices
-                    .graphics_family
-                    .expect("Graphics family queue index"),
-                0,
-            )
-        }
+    fn get_device_queue(logical_device: &ash::Device, index: u32) -> vk::Queue {
+        unsafe { logical_device.get_device_queue(index, 0) }
+    }
+
+    /**
+     * Presentation
+     */
+    fn create_win32_surface(
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        window: &winit::window::Window,
+    ) -> (ash::extensions::khr::Surface, vk::SurfaceKHR) {
+        use std::ptr;
+        use winapi::shared::windef::HWND;
+        use winapi::um::libloaderapi::GetModuleHandleW;
+        use winit::platform::windows::WindowExtWindows;
+
+        let hwnd = window.hwnd() as HWND;
+        let hinstance = unsafe { GetModuleHandleW(ptr::null()) as *const c_void };
+        let win32_create_info = vk::Win32SurfaceCreateInfoKHR::builder()
+            .hinstance(hinstance)
+            .hwnd(hwnd as *const c_void);
+        let win32_surface_loader = Win32Surface::new(entry, instance);
+        let surface = unsafe {
+            win32_surface_loader
+                .create_win32_surface(&win32_create_info, None)
+                .expect("Win32 Surface")
+        };
+        let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
+        (surface_loader, surface)
     }
 
     /**
@@ -470,6 +557,7 @@ impl Drop for HelloTriangleApplication {
             {
                 loader.destroy_debug_utils_messenger(messenger, None)
             }
+            self.surface_loader.destroy_surface(self.surface, None);
             self.logical_device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
@@ -481,6 +569,6 @@ fn main() {
 
     let event_loop = EventLoop::new();
     let window = HelloTriangleApplication::init_window(&event_loop);
-    let app = HelloTriangleApplication::initialize(debug_layers);
+    let app = HelloTriangleApplication::initialize(&window, debug_layers);
     app.run(event_loop, window);
 }
