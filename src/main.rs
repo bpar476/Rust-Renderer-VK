@@ -343,6 +343,18 @@ impl HelloTriangleApplication {
         let properties = unsafe { instance.get_physical_device_properties(*device) };
         let features = unsafe { instance.get_physical_device_features(*device) };
 
+        let required_device_extensions = vec![String::from(
+            ash::extensions::khr::Swapchain::name()
+                .to_str()
+                .expect("Swapchain extension name"),
+        )];
+        let required_device_extensions_supported =
+            HelloTriangleApplication::check_device_extension_support(
+                &instance,
+                device,
+                required_device_extensions,
+            );
+
         println!(
             "Evaluating suitability of device [{}]",
             read_vk_string(&properties.device_name[..]).unwrap()
@@ -359,6 +371,35 @@ impl HelloTriangleApplication {
         properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
             && features.geometry_shader == 1
             && supports_required_families
+            && required_device_extensions_supported
+    }
+
+    fn check_device_extension_support(
+        instance: &ash::Instance,
+        device: &vk::PhysicalDevice,
+        required_extensions: Vec<String>,
+    ) -> bool {
+        // TODO why doesn't dereferencing move device
+        let available_extensions: Vec<String> =
+            unsafe { instance.enumerate_device_extension_properties(*device) }
+                .expect("Reading device extensions")
+                .iter()
+                .map(|extension| {
+                    read_vk_string(&extension.extension_name[..])
+                        .expect("Reading device extension name")
+                })
+                .collect();
+
+        println!("Found {:?} device extensions", available_extensions);
+
+        let mut all_extensions_present = true;
+        for required_extension in required_extensions.iter() {
+            all_extensions_present =
+                available_extensions.contains(required_extension) && all_extensions_present
+        }
+        // TODO print missing extensions
+
+        all_extensions_present
     }
 
     /**
