@@ -6,7 +6,9 @@ use std::string::FromUtf8Error;
 
 use ash::extensions::ext::DebugUtils;
 use ash::extensions::khr::{Surface, Win32Surface};
-use ash::vk::{self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo};
+use ash::vk::{
+    self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo, SurfaceCapabilitiesKHR,
+};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
@@ -71,6 +73,12 @@ impl QueueFamilyIndices {
     pub fn is_complete(&self) -> bool {
         self.graphics_family.is_some() && self.present_family.is_some()
     }
+}
+
+struct SwapChainSupportDetails {
+    capabilities: ash::vk::SurfaceCapabilitiesKHR,
+    formats: Vec<ash::vk::SurfaceFormatKHR>,
+    present_modes: Vec<ash::vk::PresentModeKHR>,
 }
 
 struct HelloTriangleApplication {
@@ -160,7 +168,7 @@ impl HelloTriangleApplication {
     Instance creation
     */
     fn create_instance(entry: &ash::Entry, debug: bool) -> ash::Instance {
-        let extensions = HelloTriangleApplication::get_extensions(debug);
+        let extensions = HelloTriangleApplication::get_instance_extensions(debug);
 
         // Check available extensions
         if let Ok(properties) = entry.enumerate_instance_extension_properties() {
@@ -224,7 +232,7 @@ impl HelloTriangleApplication {
         }
     }
 
-    fn get_extensions(debug: bool) -> Vec<*const c_char> {
+    fn get_instance_extensions(debug: bool) -> Vec<*const c_char> {
         let mut extensions: Vec<*const c_char> = vec![];
 
         extensions.push(Surface::name().as_ptr());
@@ -343,11 +351,11 @@ impl HelloTriangleApplication {
         let properties = unsafe { instance.get_physical_device_properties(*device) };
         let features = unsafe { instance.get_physical_device_features(*device) };
 
-        let required_device_extensions = vec![String::from(
-            ash::extensions::khr::Swapchain::name()
-                .to_str()
-                .expect("Swapchain extension name"),
-        )];
+        let required_device_extensions: Vec<String> =
+            HelloTriangleApplication::get_device_extensions()
+                .iter()
+                .map(|&name| String::from(name.to_str().expect("Swapchain extension name")))
+                .collect();
         let required_device_extensions_supported =
             HelloTriangleApplication::check_device_extension_support(
                 &instance,
@@ -368,10 +376,21 @@ impl HelloTriangleApplication {
         )
         .is_complete();
 
-        properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
-            && features.geometry_shader == 1
-            && supports_required_families
-            && required_device_extensions_supported
+        if required_device_extensions_supported {
+            // Only check swap chain support if the swap chain device extensions are supported
+            let swap_chain_support = unsafe {
+                HelloTriangleApplication::query_swap_chain_support(surface_loader, device, surface)
+            };
+            let swap_chain_adequate = !swap_chain_support.formats.is_empty()
+                && !swap_chain_support.present_modes.is_empty();
+
+            properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
+                && features.geometry_shader == 1
+                && supports_required_families
+                && swap_chain_adequate
+        } else {
+            false
+        }
     }
 
     fn check_device_extension_support(
@@ -444,6 +463,10 @@ impl HelloTriangleApplication {
     /**
      * Logical device
      */
+    fn get_device_extensions() -> Vec<&'static CStr> {
+        vec![ash::extensions::khr::Swapchain::name()]
+    }
+
     fn create_logical_device(
         instance: &ash::Instance,
         physical_device: &vk::PhysicalDevice,
@@ -477,11 +500,17 @@ impl HelloTriangleApplication {
             .iter()
             .map(|layer_name| layer_name.as_ptr())
             .collect();
+        let enabled_extension_names: Vec<*const c_char> =
+            HelloTriangleApplication::get_device_extensions()
+                .iter()
+                .map(|&name| name.as_ptr())
+                .collect();
         let device_create_info = if debug {
             vk::DeviceCreateInfo::builder()
                 .queue_create_infos(create_infos)
                 .enabled_features(&device_features)
                 .enabled_layer_names(&validation_layers[..])
+                .enabled_extension_names(&enabled_extension_names[..])
         } else {
             vk::DeviceCreateInfo::builder()
                 .queue_create_infos(create_infos)
@@ -529,6 +558,47 @@ impl HelloTriangleApplication {
         };
         let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
         (surface_loader, surface)
+    }
+
+    /**
+     * Swap chain
+     */
+    unsafe fn query_swap_chain_support(
+        surface_loader: &ash::extensions::khr::Surface,
+        device: &ash::vk::PhysicalDevice,
+        surface: &ash::vk::SurfaceKHR,
+    ) -> SwapChainSupportDetails {
+        let capabilities = surface_loader
+            .get_physical_device_surface_capabilities(*device, *surface)
+            .expect("Physical device surface capabilities");
+
+        let formats = surface_loader
+            .get_physical_device_surface_formats(*device, *surface)
+            .expect("Surface formats");
+        let present_modes = surface_loader
+            .get_physical_device_surface_present_modes(*device, *surface)
+            .expect("Present Modes");
+
+        SwapChainSupportDetails {
+            capabilities,
+            formats,
+            present_modes,
+        }
+    }
+
+    fn choose_swap_surface_format(
+        available_formats: &Vec<ash::vk::SurfaceFormatKHR>,
+    ) -> ash::vk::SurfaceFormatKHR {
+        available_formats
+            .iter()
+            .filter(|&format| {
+                format.format == ash::vk::Format::B8G8R8A8_SRGB
+                    && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            })
+            .next()
+            .or_else(|| Some(&available_formats[0]))
+            .expect("Available surface format")
+            .to_owned()
     }
 
     /**
