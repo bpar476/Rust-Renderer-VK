@@ -1,6 +1,7 @@
 use core::panic;
+use num;
 use std::ffi::{c_void, CStr, CString};
-use std::ops::{BitAndAssign, Not};
+use std::ops::{BitAndAssign, Deref, Not};
 use std::os::raw::c_char;
 use std::string::FromUtf8Error;
 
@@ -599,6 +600,34 @@ impl HelloTriangleApplication {
             .or_else(|| Some(&available_formats[0]))
             .expect("Available surface format")
             .to_owned()
+    }
+
+    fn choose_swap_present_mode(available_modes: &Vec<vk::PresentModeKHR>) -> vk::PresentModeKHR {
+        if available_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+            vk::PresentModeKHR::MAILBOX
+        } else {
+            // FIFO is guaranteed to be available if device supports presentation
+            vk::PresentModeKHR::FIFO
+        }
+    }
+
+    fn choose_swap_extent(
+        capabilities: &vk::SurfaceCapabilitiesKHR,
+        window: &winit::window::Window,
+    ) -> vk::Extent2D {
+        if capabilities.current_extent.width != u32::MAX {
+            // The window manager has set the extent for us
+            // https://khronos.org/registry/vulkan/specs/1.2-extensions/man/html/VkSurfaceCapabilitiesKHR.html
+            capabilities.current_extent
+        } else {
+            let size = window.inner_size();
+            let min = capabilities.min_image_extent;
+            let max = capabilities.max_image_extent;
+            vk::Extent2D::builder()
+                .width(num::clamp(size.width, min.width, max.width))
+                .height(num::clamp(size.height, min.height, max.height))
+                .build()
+        }
     }
 
     /**
