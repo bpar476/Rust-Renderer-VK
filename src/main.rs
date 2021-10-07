@@ -82,6 +82,14 @@ struct SwapChainSupportDetails {
     present_modes: Vec<ash::vk::PresentModeKHR>,
 }
 
+struct SwapChainData {
+    loader: ash::extensions::khr::Swapchain,
+    swapchain: vk::SwapchainKHR,
+    images: Vec<vk::Image>,
+    format: vk::Format,
+    extent: vk::Extent2D,
+}
+
 struct HelloTriangleApplication {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -95,6 +103,8 @@ struct HelloTriangleApplication {
 
     debug_loader: Option<ash::extensions::ext::DebugUtils>,
     debug_messenger_ext: Option<vk::DebugUtilsMessengerEXT>,
+
+    swapchain_data: SwapChainData,
 }
 
 impl HelloTriangleApplication {
@@ -150,6 +160,16 @@ impl HelloTriangleApplication {
                 .expect("Present queue family index"),
         );
 
+        let swapchain_data = HelloTriangleApplication::create_swap_chain(
+            &instance,
+            &logical_device,
+            &surface_loader,
+            &physical_device,
+            &surface,
+            window,
+            &queue_families,
+        );
+
         Self {
             _entry: entry,
             instance,
@@ -162,6 +182,7 @@ impl HelloTriangleApplication {
             logical_device,
             graphics_queue,
             present_queue,
+            swapchain_data,
         }
     }
 
@@ -597,8 +618,7 @@ impl HelloTriangleApplication {
                     && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
             .next()
-            .or_else(|| Some(&available_formats[0]))
-            .expect("Available surface format")
+            .unwrap_or(&available_formats[0])
             .to_owned()
     }
 
@@ -627,6 +647,91 @@ impl HelloTriangleApplication {
                 .width(num::clamp(size.width, min.width, max.width))
                 .height(num::clamp(size.height, min.height, max.height))
                 .build()
+        }
+    }
+
+    fn create_swap_chain(
+        instance: &ash::Instance,
+        logical_device: &ash::Device,
+        surface_loader: &ash::extensions::khr::Surface,
+        physical_device: &ash::vk::PhysicalDevice,
+        surface: &vk::SurfaceKHR,
+        window: &winit::window::Window,
+        indicies: &QueueFamilyIndices,
+    ) -> SwapChainData {
+        let swap_chain_support = unsafe {
+            HelloTriangleApplication::query_swap_chain_support(
+                surface_loader,
+                physical_device,
+                surface,
+            )
+        };
+        let format =
+            HelloTriangleApplication::choose_swap_surface_format(&swap_chain_support.formats);
+        let present_mode =
+            HelloTriangleApplication::choose_swap_present_mode(&swap_chain_support.present_modes);
+        let extent =
+            HelloTriangleApplication::choose_swap_extent(&swap_chain_support.capabilities, window);
+
+        // Minimum images plus one so we always have an image to draw to while driver is working
+        let preferred_image_count = swap_chain_support.capabilities.min_image_count + 1;
+        // If max image count is 0 it means there is no max image count
+        let image_count = if swap_chain_support.capabilities.max_image_count > 0
+            && swap_chain_support.capabilities.max_image_count < preferred_image_count
+        {
+            swap_chain_support.capabilities.max_image_count
+        } else {
+            preferred_image_count
+        };
+
+        let (image_sharing_mode, families) = if indicies.graphics_family != indicies.present_family
+        {
+            // Both the graphics and the present family need to access swap chain images. If these queue families are not the
+            // same queue, then use concurent sharing mode. This is worse performance but allows us to share images without
+            // explicitly managing image ownership.
+            (
+                vk::SharingMode::CONCURRENT,
+                vec![
+                    indicies.graphics_family.unwrap(),
+                    indicies.present_family.unwrap(),
+                ],
+            )
+        } else {
+            // If the queue families are the same queue then the queue has exclusive use of swap chain images so we don't need to
+            // manage ownership anyway
+            (vk::SharingMode::EXCLUSIVE, vec![])
+        };
+
+        // See https://www.khronos.org/registry/vulkan/specs/1.2-extensions/man/html/VkSwapchainCreateInfoKHR.html for reference on all options
+        let create_info = vk::SwapchainCreateInfoKHR::builder()
+            .surface(*surface)
+            .min_image_count(image_count)
+            .image_format(format.format)
+            .image_color_space(format.color_space)
+            .image_extent(extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .pre_transform(swap_chain_support.capabilities.current_transform)
+            // Alpha blending between other windows in window system
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(present_mode)
+            .clipped(true)
+            .image_sharing_mode(image_sharing_mode)
+            .queue_family_indices(&families[..]);
+
+        let swapchain_loader = ash::extensions::khr::Swapchain::new(instance, logical_device);
+        let swapchain =
+            unsafe { swapchain_loader.create_swapchain(&create_info, None) }.expect("Swapchain");
+
+        let images =
+            unsafe { swapchain_loader.get_swapchain_images(swapchain) }.expect("Swapchain images");
+
+        SwapChainData {
+            loader: swapchain_loader,
+            swapchain: swapchain,
+            format: format.format,
+            extent: extent,
+            images,
         }
     }
 
@@ -697,6 +802,9 @@ impl Drop for HelloTriangleApplication {
             {
                 loader.destroy_debug_utils_messenger(messenger, None)
             }
+            self.swapchain_data
+                .loader
+                .destroy_swapchain(self.swapchain_data.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.logical_device.destroy_device(None);
             self.instance.destroy_instance(None);
