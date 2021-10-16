@@ -6,7 +6,7 @@ use std::os::raw::c_char;
 use std::string::FromUtf8Error;
 
 use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::{Surface, Win32Surface};
+use ash::extensions::khr::{Surface, Swapchain, Win32Surface};
 use ash::vk::{
     self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo, SurfaceCapabilitiesKHR,
 };
@@ -105,6 +105,7 @@ struct HelloTriangleApplication {
     debug_messenger_ext: Option<vk::DebugUtilsMessengerEXT>,
 
     swapchain_data: SwapChainData,
+    swapchain_image_views: Vec<vk::ImageView>,
 }
 
 impl HelloTriangleApplication {
@@ -170,6 +171,9 @@ impl HelloTriangleApplication {
             &queue_families,
         );
 
+        let swapchain_image_views =
+            HelloTriangleApplication::create_image_views(&logical_device, &swapchain_data);
+
         Self {
             _entry: entry,
             instance,
@@ -183,6 +187,7 @@ impl HelloTriangleApplication {
             graphics_queue,
             present_queue,
             swapchain_data,
+            swapchain_image_views,
         }
     }
 
@@ -735,6 +740,46 @@ impl HelloTriangleApplication {
         }
     }
 
+    fn create_image_views(
+        device: &ash::Device,
+        swapchain_data: &SwapChainData,
+    ) -> Vec<vk::ImageView> {
+        swapchain_data
+            .images
+            .iter()
+            .map(|image| {
+                let ci = vk::ImageViewCreateInfo::builder()
+                    // TODO is copying bad here?
+                    .image(*image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(swapchain_data.format)
+                    .components(
+                        vk::ComponentMapping::builder()
+                            .r(vk::ComponentSwizzle::IDENTITY)
+                            .g(vk::ComponentSwizzle::IDENTITY)
+                            .b(vk::ComponentSwizzle::IDENTITY)
+                            .a(vk::ComponentSwizzle::IDENTITY)
+                            .build(),
+                    )
+                    // TODO look up what a subresource range is from khronos reference
+                    .subresource_range(
+                        vk::ImageSubresourceRange::builder()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1)
+                            .build(),
+                    );
+                unsafe {
+                    device
+                        .create_image_view(&ci, None)
+                        .expect("Creating image view")
+                }
+            })
+            .collect()
+    }
+
     /**
     Main loop
     */
@@ -801,6 +846,9 @@ impl Drop for HelloTriangleApplication {
                 (self.debug_loader.as_ref(), self.debug_messenger_ext)
             {
                 loader.destroy_debug_utils_messenger(messenger, None)
+            }
+            for image_view in self.swapchain_image_views.iter() {
+                self.logical_device.destroy_image_view(*image_view, None)
             }
             self.swapchain_data
                 .loader
