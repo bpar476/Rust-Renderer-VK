@@ -784,11 +784,39 @@ impl HelloTriangleApplication {
             .collect()
     }
 
-    fn create_graphics_pipeline() {
+    fn create_graphics_pipeline(device: &ash::Device) {
         let vert_shader_code =
             util::read_shader_code(Path::new(env!("OUT_DIR")).join("vert.spv").as_path());
         let frag_shader_code =
             util::read_shader_code(Path::new(env!("OUT_DIR")).join("frag.spv").as_path());
+
+        let vert_shader_module =
+            HelloTriangleApplication::create_shader_module(device, vert_shader_code);
+        let frag_shader_module =
+            HelloTriangleApplication::create_shader_module(device, frag_shader_code);
+
+        let main_fn_name = CString::new("main").unwrap();
+        let vert_stage_builder = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert_shader_module)
+            .name(main_fn_name.as_c_str());
+        let frag_stage_builder = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag_shader_module)
+            .name(main_fn_name.as_c_str());
+        let shader_stages = vec![vert_stage_builder, frag_stage_builder];
+
+        unsafe { device.destroy_shader_module(vert_shader_module, None) };
+        unsafe { device.destroy_shader_module(frag_shader_module, None) };
+    }
+
+    fn create_shader_module(device: &ash::Device, code: Vec<u32>) -> vk::ShaderModule {
+        let builder = vk::ShaderModuleCreateInfo::builder().code(&code[..]);
+        unsafe {
+            device
+                .create_shader_module(&builder, None)
+                .expect("Shader module")
+        }
     }
 
     /**
