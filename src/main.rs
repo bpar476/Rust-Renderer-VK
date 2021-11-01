@@ -3,7 +3,9 @@ use num;
 use std::ffi::{c_void, CStr, CString};
 use std::ops::{BitAndAssign, Deref, Not};
 use std::os::raw::c_char;
+use std::path::Path;
 use std::string::FromUtf8Error;
+mod util;
 
 use ash::extensions::ext::DebugUtils;
 use ash::extensions::khr::{Surface, Swapchain, Win32Surface};
@@ -173,6 +175,8 @@ impl HelloTriangleApplication {
 
         let swapchain_image_views =
             HelloTriangleApplication::create_image_views(&logical_device, &swapchain_data);
+
+        let graphics_pipeline = HelloTriangleApplication::create_graphics_pipeline();
 
         Self {
             _entry: entry,
@@ -778,6 +782,13 @@ impl HelloTriangleApplication {
                 }
             })
             .collect()
+    }
+
+    fn create_graphics_pipeline() {
+        let vert_shader_code =
+            util::read_shader_code(Path::new(env!("OUT_DIR")).join("vert.spv").as_path());
+        let frag_shader_code =
+            util::read_shader_code(Path::new(env!("OUT_DIR")).join("frag.spv").as_path());
     }
 
     /**
