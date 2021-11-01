@@ -784,7 +784,7 @@ impl HelloTriangleApplication {
             .collect()
     }
 
-    fn create_graphics_pipeline(device: &ash::Device) {
+    fn create_graphics_pipeline(device: &ash::Device, swap_chain_extents: vk::Extent2D) {
         let vert_shader_code =
             util::read_shader_code(Path::new(env!("OUT_DIR")).join("vert.spv").as_path());
         let frag_shader_code =
@@ -805,6 +805,54 @@ impl HelloTriangleApplication {
             .module(frag_shader_module)
             .name(main_fn_name.as_c_str());
         let shader_stages = vec![vert_stage_builder, frag_stage_builder];
+
+        // Describe our vertex layout, the input for the vertex shader
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_binding_descriptions(&[])
+            .vertex_attribute_descriptions(&[]);
+
+        // Describe the primitives we are drawing with our vertices
+        let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        // Describe the region of the framebuffer that we want to render to
+        let viewport = vk::Viewport::builder()
+            .x(0.0)
+            .y(0.0)
+            .min_depth(0.0)
+            .max_depth(1.0)
+            .width(swap_chain_extents.width as f32)
+            .height(swap_chain_extents.height as f32);
+
+        // Clipping filter for frame buffer. We don't want to clip the frame buffer with this pipeline so we do the entire frame buffer.
+        let scissor = vk::Rect2D::builder()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(swap_chain_extents);
+
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+            .viewports(&[viewport.build()])
+            .scissors(&[scissor.build()]);
+
+        // Set up a rasterizer
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
+            .depth_clamp_enable(false) // Clip beyond near and far planes
+            .rasterizer_discard_enable(false) // Don't skip rasterization
+            .polygon_mode(vk::PolygonMode::FILL) // Rasterize entire polygon
+            .line_width(1.0) // Rasterization line width
+            .cull_mode(vk::CullModeFlags::BACK) // Face culling
+            .front_face(vk::FrontFace::CLOCKWISE) // Vertex direction to determine if face is front or back
+            .depth_bias_enable(false); // Don't alter depth values with bias
+
+        // MSAA config. Ignored for now.
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::builder()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+            .min_sample_shading(1.0)
+            .alpha_to_coverage_enable(false)
+            .alpha_to_one_enable(false);
+
+        // TODO Depth and stencil testing, Dynamic state, Pipeline layout
 
         unsafe { device.destroy_shader_module(vert_shader_module, None) };
         unsafe { device.destroy_shader_module(frag_shader_module, None) };
