@@ -176,7 +176,10 @@ impl HelloTriangleApplication {
         let swapchain_image_views =
             HelloTriangleApplication::create_image_views(&logical_device, &swapchain_data);
 
-        let graphics_pipeline = HelloTriangleApplication::create_graphics_pipeline();
+        let graphics_pipeline = HelloTriangleApplication::create_graphics_pipeline(
+            &logical_device,
+            swapchain_data.extent,
+        );
 
         Self {
             _entry: entry,
@@ -852,7 +855,21 @@ impl HelloTriangleApplication {
             .alpha_to_coverage_enable(false)
             .alpha_to_one_enable(false);
 
-        // TODO Depth and stencil testing, Dynamic state, Pipeline layout
+        // TODO Set up alpha blending
+        let color_blend_attachments = vk::PipelineColorBlendAttachmentState::builder()
+            .color_write_mask(vk::ColorComponentFlags::all())
+            .blend_enable(false);
+        let global_blend = vk::PipelineColorBlendStateCreateInfo::builder()
+            .logic_op_enable(false)
+            .attachments(&[color_blend_attachments.build()]);
+
+        let dynamic_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::LINE_WIDTH];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(dynamic_states);
+
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
+        // TODO destroy pipeline layout
+        let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) };
 
         unsafe { device.destroy_shader_module(vert_shader_module, None) };
         unsafe { device.destroy_shader_module(frag_shader_module, None) };
