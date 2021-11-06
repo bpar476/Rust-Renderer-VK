@@ -10,7 +10,8 @@ mod util;
 use ash::extensions::ext::DebugUtils;
 use ash::extensions::khr::{Surface, Swapchain, Win32Surface};
 use ash::vk::{
-    self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo, SurfaceCapabilitiesKHR,
+    self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo, RenderPass,
+    SurfaceCapabilitiesKHR,
 };
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -108,6 +109,10 @@ struct HelloTriangleApplication {
 
     swapchain_data: SwapChainData,
     swapchain_image_views: Vec<vk::ImageView>,
+
+    render_pass: vk::RenderPass,
+    pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline,
 }
 
 impl HelloTriangleApplication {
@@ -176,10 +181,15 @@ impl HelloTriangleApplication {
         let swapchain_image_views =
             HelloTriangleApplication::create_image_views(&logical_device, &swapchain_data);
 
-        let graphics_pipeline = HelloTriangleApplication::create_graphics_pipeline(
-            &logical_device,
-            swapchain_data.extent,
-        );
+        let render_pass =
+            HelloTriangleApplication::create_render_pass(&logical_device, swapchain_data.format);
+
+        let (graphics_pipeline, pipeline_layout) =
+            HelloTriangleApplication::create_graphics_pipeline(
+                &logical_device,
+                swapchain_data.extent,
+                render_pass,
+            );
 
         Self {
             _entry: entry,
@@ -195,6 +205,9 @@ impl HelloTriangleApplication {
             present_queue,
             swapchain_data,
             swapchain_image_views,
+            render_pass,
+            pipeline_layout,
+            graphics_pipeline,
         }
     }
 
@@ -787,16 +800,63 @@ impl HelloTriangleApplication {
             .collect()
     }
 
-    fn create_graphics_pipeline(device: &ash::Device, swap_chain_extents: vk::Extent2D) {
-        let vert_shader_code =
-            util::read_shader_code(Path::new(env!("OUT_DIR")).join("vert.spv").as_path());
-        let frag_shader_code =
-            util::read_shader_code(Path::new(env!("OUT_DIR")).join("frag.spv").as_path());
+    fn create_render_pass(device: &ash::Device, swap_chain_format: vk::Format) -> vk::RenderPass {
+        let color_attachment = vk::AttachmentDescription::builder()
+            .format(swap_chain_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .build();
+
+        let color_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .build();
+
+        let subpass = vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&[color_attachment_ref])
+            .build();
+
+        let attachments = &[color_attachment];
+        let subpasses = &[subpass];
+        let render_pass_ci = vk::RenderPassCreateInfo::builder()
+            .attachments(attachments)
+            .subpasses(subpasses);
+
+        unsafe {
+            device
+                .create_render_pass(&render_pass_ci, None)
+                .expect("render pass")
+        }
+    }
+
+    fn create_graphics_pipeline(
+        device: &ash::Device,
+        swap_chain_extents: vk::Extent2D,
+        render_pass: vk::RenderPass,
+    ) -> (vk::Pipeline, vk::PipelineLayout) {
+        let vert_path = Path::new(env!("OUT_DIR")).join("vert.spv");
+        println!(
+            "Reading vertex shader from {}",
+            vert_path.to_str().expect("vertex shader path")
+        );
+        let vert_shader_code = util::read_shader_code(vert_path.as_path());
+        let frag_path = Path::new(env!("OUT_DIR")).join("frag.spv");
+        println!(
+            "Reading frag shader from {}",
+            frag_path.to_str().expect("frag shader path")
+        );
+        let frag_shader_code = util::read_shader_code(frag_path.as_path());
 
         let vert_shader_module =
-            HelloTriangleApplication::create_shader_module(device, vert_shader_code);
+            HelloTriangleApplication::create_shader_module(device, &vert_shader_code);
         let frag_shader_module =
-            HelloTriangleApplication::create_shader_module(device, frag_shader_code);
+            HelloTriangleApplication::create_shader_module(device, &frag_shader_code);
 
         let main_fn_name = CString::new("main").unwrap();
         let vert_stage_builder = vk::PipelineShaderStageCreateInfo::builder()
@@ -807,7 +867,7 @@ impl HelloTriangleApplication {
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(frag_shader_module)
             .name(main_fn_name.as_c_str());
-        let shader_stages = vec![vert_stage_builder, frag_stage_builder];
+        let shader_stages = vec![vert_stage_builder.build(), frag_stage_builder.build()];
 
         // Describe our vertex layout, the input for the vertex shader
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
@@ -833,9 +893,11 @@ impl HelloTriangleApplication {
             .offset(vk::Offset2D { x: 0, y: 0 })
             .extent(swap_chain_extents);
 
+        let viewports = [viewport.build()];
+        let scissors = [scissor.build()];
         let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
-            .viewports(&[viewport.build()])
-            .scissors(&[scissor.build()]);
+            .viewports(&viewports)
+            .scissors(&scissors);
 
         // Set up a rasterizer
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
@@ -856,27 +918,55 @@ impl HelloTriangleApplication {
             .alpha_to_one_enable(false);
 
         // TODO Set up alpha blending
-        let color_blend_attachments = vk::PipelineColorBlendAttachmentState::builder()
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
             .color_write_mask(vk::ColorComponentFlags::all())
-            .blend_enable(false);
+            .blend_enable(false)
+            .build();
+        let color_blend_attachments = [color_blend_attachment];
         let global_blend = vk::PipelineColorBlendStateCreateInfo::builder()
             .logic_op_enable(false)
-            .attachments(&[color_blend_attachments.build()]);
+            .attachments(&color_blend_attachments);
 
         let dynamic_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::LINE_WIDTH];
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(dynamic_states);
 
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
-        // TODO destroy pipeline layout
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) };
+        let pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(&pipeline_layout_info, None)
+                .expect("pipeline layout")
+        };
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages[..])
+            .vertex_input_state(&vertex_input_info)
+            .input_assembly_state(&input_assembly_info)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&global_blend)
+            .layout(pipeline_layout)
+            .render_pass(render_pass);
+
+        let pipelines = unsafe {
+            device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[pipeline_info.build()],
+                    None,
+                )
+                .expect("graphics pipeline")
+        };
 
         unsafe { device.destroy_shader_module(vert_shader_module, None) };
         unsafe { device.destroy_shader_module(frag_shader_module, None) };
+
+        (pipelines[0], pipeline_layout)
     }
 
-    fn create_shader_module(device: &ash::Device, code: Vec<u32>) -> vk::ShaderModule {
-        let builder = vk::ShaderModuleCreateInfo::builder().code(&code[..]);
+    fn create_shader_module(device: &ash::Device, code: &[u32]) -> vk::ShaderModule {
+        let builder = vk::ShaderModuleCreateInfo::builder().code(code);
         unsafe {
             device
                 .create_shader_module(&builder, None)
@@ -945,6 +1035,13 @@ impl HelloTriangleApplication {
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
         unsafe {
+            self.logical_device
+                .destroy_render_pass(self.render_pass, None);
+            self.logical_device
+                .destroy_pipeline(self.graphics_pipeline, None);
+            self.logical_device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+
             if let (Some(loader), Some(messenger)) =
                 // FIXME: Not quite sure why this needs to be a ref
                 (self.debug_loader.as_ref(), self.debug_messenger_ext)
