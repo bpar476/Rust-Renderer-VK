@@ -113,6 +113,8 @@ struct HelloTriangleApplication {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
+
+    swap_chain_frame_buffers: Vec<vk::Framebuffer>,
 }
 
 impl HelloTriangleApplication {
@@ -191,6 +193,13 @@ impl HelloTriangleApplication {
                 render_pass,
             );
 
+        let swap_chain_frame_buffers = HelloTriangleApplication::create_frame_buffers(
+            &logical_device,
+            &swapchain_image_views,
+            swapchain_data.extent,
+            render_pass,
+        );
+
         Self {
             _entry: entry,
             instance,
@@ -208,6 +217,7 @@ impl HelloTriangleApplication {
             render_pass,
             pipeline_layout,
             graphics_pipeline,
+            swap_chain_frame_buffers,
         }
     }
 
@@ -974,6 +984,36 @@ impl HelloTriangleApplication {
         }
     }
 
+    fn create_frame_buffers(
+        device: &ash::Device,
+        swapchain_image_views: &Vec<vk::ImageView>,
+        swapchain_extent: vk::Extent2D,
+        render_pass: vk::RenderPass,
+    ) -> Vec<vk::Framebuffer> {
+        // Create a frame bufffer for each swap chain image
+        swapchain_image_views
+            .iter()
+            .map(|&image_view| {
+                let attachments = [image_view];
+
+                let builder = vk::FramebufferCreateInfo::builder()
+                    // Which render pass this buffer is for
+                    .render_pass(render_pass)
+                    // The images to pass to the render pass - will be bound to render pass image attachments
+                    .attachments(&attachments)
+                    .width(swapchain_extent.width)
+                    .height(swapchain_extent.height)
+                    .layers(1);
+
+                unsafe {
+                    device
+                        .create_framebuffer(&builder, None)
+                        .expect("Frame buffer for image view")
+                }
+            })
+            .collect()
+    }
+
     /**
     Main loop
     */
@@ -1035,6 +1075,10 @@ impl HelloTriangleApplication {
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
         unsafe {
+            for &frame_buffer in self.swap_chain_frame_buffers.iter() {
+                self.logical_device.destroy_framebuffer(frame_buffer, None)
+            }
+
             self.logical_device
                 .destroy_render_pass(self.render_pass, None);
             self.logical_device
@@ -1048,8 +1092,8 @@ impl Drop for HelloTriangleApplication {
             {
                 loader.destroy_debug_utils_messenger(messenger, None)
             }
-            for image_view in self.swapchain_image_views.iter() {
-                self.logical_device.destroy_image_view(*image_view, None)
+            for &image_view in self.swapchain_image_views.iter() {
+                self.logical_device.destroy_image_view(image_view, None)
             }
             self.swapchain_data
                 .loader
