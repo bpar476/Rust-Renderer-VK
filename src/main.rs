@@ -1,5 +1,5 @@
 use core::panic;
-use num;
+use num::{self, range};
 use std::ffi::{c_void, CStr, CString};
 use std::ops::{BitAndAssign, Deref, Not};
 use std::os::raw::c_char;
@@ -115,6 +115,9 @@ struct HelloTriangleApplication {
     graphics_pipeline: vk::Pipeline,
 
     swap_chain_frame_buffers: Vec<vk::Framebuffer>,
+
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
 }
 
 impl HelloTriangleApplication {
@@ -200,6 +203,18 @@ impl HelloTriangleApplication {
             render_pass,
         );
 
+        let command_pool =
+            HelloTriangleApplication::create_command_pool(&logical_device, &queue_families);
+
+        let command_buffers = HelloTriangleApplication::create_command_buffers(
+            &logical_device,
+            command_pool,
+            render_pass,
+            &swap_chain_frame_buffers,
+            swapchain_data.extent,
+            graphics_pipeline,
+        );
+
         Self {
             _entry: entry,
             instance,
@@ -218,6 +233,8 @@ impl HelloTriangleApplication {
             pipeline_layout,
             graphics_pipeline,
             swap_chain_frame_buffers,
+            command_pool,
+            command_buffers,
         }
     }
 
@@ -1014,6 +1031,103 @@ impl HelloTriangleApplication {
             .collect()
     }
 
+    /// Creates a command pool - a vulkan structure to manage the memory for storing buggers and command buffers
+    /// allocated by them.
+    fn create_command_pool(
+        device: &ash::Device,
+        queue_indices: &QueueFamilyIndices,
+    ) -> vk::CommandPool {
+        let ci = vk::CommandPoolCreateInfo::builder()
+            // Which queue will this command pool create command buffers for
+            .queue_family_index(
+                queue_indices
+                    .graphics_family
+                    .expect("Graphics queue family"),
+            );
+
+        unsafe {
+            device
+                .create_command_pool(&ci, None)
+                .expect("Graphics command pool")
+        }
+    }
+
+    /// Allocates `num_buffers` command buffers to the given command pool on the given device
+    fn create_command_buffers(
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+        render_pass: vk::RenderPass,
+        frame_buffers: &Vec<vk::Framebuffer>,
+        swap_chain_extent: vk::Extent2D,
+        graphics_pipeline: vk::Pipeline,
+    ) -> Vec<vk::CommandBuffer> {
+        let num_buffers = frame_buffers.len();
+        if frame_buffers.len() != num_buffers {
+            panic!("Must have same number of command buffers as frame buffers")
+        }
+
+        let ci = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(command_pool)
+            // Primary command buffer is submitted directly to queue, cannot be called from other command buffers.
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(num_buffers as u32);
+
+        let buffers = unsafe {
+            device
+                .allocate_command_buffers(&ci)
+                .expect("Command buffers")
+        };
+
+        for i in range(0, num_buffers) {
+            let index = i as usize;
+            let buffer = buffers[index];
+            let frame_buffer = frame_buffers[index];
+
+            let bi = vk::CommandBufferBeginInfo::builder();
+
+            unsafe {
+                device
+                    .begin_command_buffer(buffer, &bi)
+                    .expect("Recording command buffer")
+            };
+
+            let clear_values = [vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            }];
+
+            let render_pass_bi = vk::RenderPassBeginInfo::builder()
+                .render_pass(render_pass)
+                .framebuffer(frame_buffer)
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: swap_chain_extent,
+                })
+                .clear_values(&clear_values);
+
+            unsafe {
+                // Inline means render pass commands will be in primary command buffer as opposed to SECONDARY_COMMAND_BUFFERS
+                // where render pass commands are in secondary buffer
+                device.cmd_begin_render_pass(buffer, &render_pass_bi, vk::SubpassContents::INLINE);
+                device.cmd_bind_pipeline(
+                    buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    graphics_pipeline,
+                );
+                device.cmd_draw(buffer, 3, 1, 0, 0);
+
+                device.cmd_end_render_pass(buffer);
+
+                device
+                    .end_command_buffer(buffer)
+                    .expect("Ending command buffer")
+            }
+        }
+
+        buffers
+    }
+
     /**
     Main loop
     */
@@ -1075,6 +1189,9 @@ impl HelloTriangleApplication {
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
         unsafe {
+            self.logical_device
+                .destroy_command_pool(self.command_pool, None);
+
             for &frame_buffer in self.swap_chain_frame_buffers.iter() {
                 self.logical_device.destroy_framebuffer(frame_buffer, None)
             }
