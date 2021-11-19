@@ -22,6 +22,7 @@ const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 
 const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 // Debug utils callback
 unsafe extern "system" fn vulkan_debug_utils_callback(
@@ -118,6 +119,13 @@ struct HelloTriangleApplication {
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_complete_semaphores: Vec<vk::Semaphore>,
+    frame_fences: Vec<vk::Fence>,
+    image_fences: Vec<vk::Fence>,
+
+    current_frame: usize,
 }
 
 impl HelloTriangleApplication {
@@ -215,6 +223,14 @@ impl HelloTriangleApplication {
             graphics_pipeline,
         );
 
+        // TODO: Handle image in flight fences
+        let (image_available_semaphores, render_complete_semaphores, frame_fences) =
+            HelloTriangleApplication::create_synchronisation_primitives(&logical_device);
+
+        let image_fences: Vec<vk::Fence> = range(0, swapchain_data.images.len())
+            .map(|_| vk::Fence::null())
+            .collect();
+
         Self {
             _entry: entry,
             instance,
@@ -235,6 +251,11 @@ impl HelloTriangleApplication {
             swap_chain_frame_buffers,
             command_pool,
             command_buffers,
+            image_available_semaphores,
+            render_complete_semaphores,
+            frame_fences,
+            image_fences,
+            current_frame: 0,
         }
     }
 
@@ -849,11 +870,27 @@ impl HelloTriangleApplication {
             .color_attachments(&[color_attachment_ref])
             .build();
 
+        // Declare subpass dependencies
+        let dependency = vk::SubpassDependency::builder()
+            // Implicit subpass that always takes place
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            // Our subpass, index 0
+            .dst_subpass(0)
+            // Operation to wait on
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            // Stage that the operation occurs in
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .build();
+        let subpass_dependencies = [dependency];
+
         let attachments = &[color_attachment];
         let subpasses = &[subpass];
         let render_pass_ci = vk::RenderPassCreateInfo::builder()
             .attachments(attachments)
-            .subpasses(subpasses);
+            .subpasses(subpasses)
+            .dependencies(&subpass_dependencies);
 
         unsafe {
             device
@@ -1128,6 +1165,42 @@ impl HelloTriangleApplication {
         buffers
     }
 
+    fn create_synchronisation_primitives(
+        device: &ash::Device,
+    ) -> (Vec<vk::Semaphore>, Vec<vk::Semaphore>, Vec<vk::Fence>) {
+        let mut image_available_semaphores: Vec<vk::Semaphore> = Vec::new();
+        let mut render_complete_semaphores: Vec<vk::Semaphore> = Vec::new();
+        let mut in_flight_fences: Vec<vk::Fence> = Vec::new();
+
+        for _ in num::range(0, MAX_FRAMES_IN_FLIGHT) {
+            let (image_semaphore, render_semaphore, frame_fence) = unsafe {
+                (
+                    device
+                        .create_semaphore(&vk::SemaphoreCreateInfo::builder(), None)
+                        .expect("Image Semaphore"),
+                    device
+                        .create_semaphore(&vk::SemaphoreCreateInfo::builder(), None)
+                        .expect("Render Semaphore"),
+                    device
+                        .create_fence(
+                            &vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED),
+                            None,
+                        )
+                        .expect("Frame fence"),
+                )
+            };
+            image_available_semaphores.push(image_semaphore);
+            render_complete_semaphores.push(render_semaphore);
+            in_flight_fences.push(frame_fence);
+        }
+
+        (
+            image_available_semaphores,
+            render_complete_semaphores,
+            in_flight_fences,
+        )
+    }
+
     /**
     Main loop
     */
@@ -1140,7 +1213,96 @@ impl HelloTriangleApplication {
     }
 
     fn draw_frame(&mut self) {
-        // Drawing will be here
+        // TODO: Wait for fences
+        let current_frame_fences = [self.frame_fences[self.current_frame]];
+        unsafe {
+            self.logical_device
+                .wait_for_fences(&current_frame_fences, true, u64::MAX)
+                .expect("Waiting for frame fence");
+        };
+
+        // Request an image from the swap chain. It will signal the given semaphore when the image is ready
+        let image_index = unsafe {
+            self.swapchain_data
+                .loader
+                .acquire_next_image(
+                    self.swapchain_data.swapchain,
+                    u64::MAX,
+                    self.image_available_semaphores[self.current_frame],
+                    vk::Fence::null(),
+                )
+                .expect("image index")
+                .0 as usize
+        };
+
+        // Make sure we don't reference a swapchain image that is already being presented
+        if self.image_fences[image_index] != vk::Fence::null() {
+            let active_image_in_flight_fences = [self.image_fences[image_index]];
+            unsafe {
+                self.logical_device
+                    .wait_for_fences(&active_image_in_flight_fences, true, u64::MAX)
+                    .expect("Image in flight fence");
+            };
+        };
+        self.image_fences[image_index] = self.frame_fences[self.current_frame];
+
+        let render_wait_semaphores = [self.image_available_semaphores[self.current_frame]];
+        let render_signal_semaphores = [self.render_complete_semaphores[self.current_frame]];
+        let wait_stage = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let command_buffers = [self.command_buffers[image_index]];
+        // Submit info is data representing a request to a queue and how to synchronise it with other requests
+        // Tells vulkan to wait at the "color attachment" point until the image_available_semaphore has signaled,
+        // then run the command buffer. Once the commands are complete, signal the "render_complete_semaphore".
+        let submit_info = vk::SubmitInfo::builder()
+            .wait_semaphores(&render_wait_semaphores)
+            .wait_dst_stage_mask(&wait_stage)
+            .command_buffers(&command_buffers)
+            .signal_semaphores(&render_signal_semaphores);
+
+        let queue_submissions = [submit_info.build()];
+
+        unsafe {
+            self.logical_device
+                .reset_fences(&current_frame_fences)
+                .expect("Resetting current frame fence");
+            self.logical_device
+                .queue_submit(
+                    self.graphics_queue,
+                    &queue_submissions,
+                    self.frame_fences[self.current_frame],
+                )
+                .expect("Graphics queue submit")
+        };
+
+        let present_wait_semaphores = render_signal_semaphores;
+        let swapchains = [self.swapchain_data.swapchain];
+        let image_indices = [image_index as u32];
+        let present_info = vk::PresentInfoKHR::builder()
+            .wait_semaphores(&present_wait_semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+
+        let present_result = unsafe {
+            self.swapchain_data
+                .loader
+                .queue_present(self.present_queue, &present_info.build())
+        };
+
+        match unsafe { self.logical_device.queue_wait_idle(self.present_queue) } {
+            Ok(_) => {}
+            Err(result) => {
+                println!("Error waiting for present queue: {}", result)
+            }
+        };
+
+        match present_result {
+            Ok(_) => {}
+            Err(result) => {
+                println!("Presentation did not complete: {:?}", result);
+            }
+        }
+
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     fn main_loop(mut self, event_loop: EventLoop<()>, window: Window) {
@@ -1189,6 +1351,17 @@ impl HelloTriangleApplication {
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
         unsafe {
+            for &semaphore in self.image_available_semaphores.iter() {
+                self.logical_device.destroy_semaphore(semaphore, None);
+            }
+            for &semaphore in self.render_complete_semaphores.iter() {
+                self.logical_device.destroy_semaphore(semaphore, None);
+            }
+
+            for &fence in self.frame_fences.iter() {
+                self.logical_device.destroy_fence(fence, None);
+            }
+
             self.logical_device
                 .destroy_command_pool(self.command_pool, None);
 
