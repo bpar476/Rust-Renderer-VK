@@ -1,18 +1,17 @@
 use core::panic;
 use num::{self, range};
 use std::ffi::{c_void, CStr, CString};
-use std::ops::{BitAndAssign, Deref, Not};
+use std::ops::{BitAndAssign, Not};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::string::FromUtf8Error;
+mod debug;
+mod instance;
 mod util;
 
 use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::{Surface, Swapchain, Win32Surface};
-use ash::vk::{
-    self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo, RenderPass,
-    SurfaceCapabilitiesKHR,
-};
+use ash::extensions::khr::{Surface, Win32Surface};
+use ash::vk::{self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
@@ -50,23 +49,6 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
 
     // Return false to indicate that validation should not cause a crash
     vk::FALSE
-}
-
-fn read_vk_string(chars: &[c_char]) -> Result<String, FromUtf8Error> {
-    let terminator = '\0' as u8;
-    let mut content: Vec<u8> = vec![];
-
-    for raw in chars.iter() {
-        let ch = (*raw) as u8;
-
-        if ch != terminator {
-            content.push(ch);
-        } else {
-            break;
-        }
-    }
-
-    String::from_utf8(content)
 }
 
 struct QueueFamilyIndices {
@@ -263,80 +245,26 @@ impl HelloTriangleApplication {
     Instance creation
     */
     fn create_instance(entry: &ash::Entry, debug: bool) -> ash::Instance {
-        let extensions = HelloTriangleApplication::get_instance_extensions(debug);
-
-        // Check available extensions
-        if let Ok(properties) = entry.enumerate_instance_extension_properties() {
-            // TODO check that required extensions are present
-            properties
-                .iter()
-                .map(|property| read_vk_string(&property.extension_name[..]).unwrap())
-                .for_each(|name| println!("Loaded Vulkan extension: {}", name));
-        } else {
-            panic!("Unable to load required platform extensions")
-        };
-
         // Validate validation layers
         if debug {
             HelloTriangleApplication::assert_required_validation_layers_available(&entry)
         };
-        let required_validation_layer_raw_names: Vec<CString> = VALIDATION_LAYERS
-            .iter()
-            .map(|layer_name| CString::new(*layer_name).unwrap())
-            .collect();
-        let validation_layers: Vec<*const c_char> = required_validation_layer_raw_names
-            .iter()
-            .map(|layer_name| layer_name.as_ptr())
-            .collect();
 
-        // Create initialisation structs
-        let app_name = CString::new(APP_TITLE).unwrap();
-        let engine_name = CString::new("Name Pending").unwrap();
-        let app_info = ApplicationInfo::builder()
-            .application_name(&app_name)
-            .application_version(vk::make_api_version(0, 0, 0, 1))
-            .engine_name(&engine_name)
-            .engine_version(vk::make_api_version(0, 0, 0, 1))
-            .api_version(vk::API_VERSION_1_0)
-            .build();
-
-        let mut debug_utils_create_info =
+        let debug_utils_create_info =
             HelloTriangleApplication::build_debug_utils_messenger_create_info();
-        let create_info = if debug {
-            println!("Creating instance with the following validation layers:");
-            for layer in VALIDATION_LAYERS.iter() {
-                println!("\t{}", layer)
-            }
 
-            InstanceCreateInfo::builder()
-                .application_info(&app_info)
-                .enabled_layer_names(&validation_layers[..])
-                .enabled_extension_names(&extensions[..])
-                .push_next(&mut debug_utils_create_info)
-        } else {
-            InstanceCreateInfo::builder()
-                .application_info(&app_info)
-                .enabled_extension_names(&extensions[..])
-        };
-
-        // Create instance
-        unsafe {
-            entry
-                .create_instance(&create_info, None)
-                .expect("Failed to create Vulkan instance")
-        }
-    }
-
-    fn get_instance_extensions(debug: bool) -> Vec<*const c_char> {
-        let mut extensions: Vec<*const c_char> = vec![];
-
-        extensions.push(Surface::name().as_ptr());
-        extensions.push(Win32Surface::name().as_ptr());
-
-        if debug {
-            extensions.push(DebugUtils::name().as_ptr());
-        }
-        extensions
+        let layers: Vec<CString> = VALIDATION_LAYERS
+            .iter()
+            .map(|&layer| CString::new(layer).unwrap())
+            .collect();
+        let extensions = vec![
+            Surface::name().to_owned(),
+            Win32Surface::name().to_owned(),
+            // TODO separate loading debug extensions
+            DebugUtils::name().to_owned(),
+        ];
+        let mut extension_inputs = vec![debug_utils_create_info];
+        instance::new(entry, &layers, &extensions, &mut extension_inputs).unwrap()
     }
 
     fn assert_required_validation_layers_available(entry: &ash::Entry) {
@@ -344,7 +272,7 @@ impl HelloTriangleApplication {
             Ok(layers) => {
                 let layer_names: Vec<String> = layers
                     .iter()
-                    .map(|layer| read_vk_string(&layer.layer_name[..]).unwrap())
+                    .map(|layer| util::read_vk_string(&layer.layer_name[..]).unwrap())
                     .collect();
 
                 layer_names
@@ -388,16 +316,21 @@ impl HelloTriangleApplication {
         entry: &ash::Entry,
         instance: &ash::Instance,
     ) -> (ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT) {
+        println!("Creating debug messenger");
         let create_info = HelloTriangleApplication::build_debug_utils_messenger_create_info();
         // This DebugUtils struct loads the extension function for us since debug utils are not a part of the standard
         // they are not loaded when creating the Entry
         let debug_utils_loader = ash::extensions::ext::DebugUtils::new(entry, instance);
+
+        println!("Got loader");
 
         let messenger = unsafe {
             debug_utils_loader
                 .create_debug_utils_messenger(&create_info, None)
                 .expect("Debug Utils Callback")
         };
+
+        println!("Created messenger");
 
         (debug_utils_loader, messenger)
     }
@@ -460,7 +393,7 @@ impl HelloTriangleApplication {
 
         println!(
             "Evaluating suitability of device [{}]",
-            read_vk_string(&properties.device_name[..]).unwrap()
+            util::read_vk_string(&properties.device_name[..]).unwrap()
         );
 
         let supports_required_families = HelloTriangleApplication::find_queue_families(
@@ -499,7 +432,7 @@ impl HelloTriangleApplication {
                 .expect("Reading device extensions")
                 .iter()
                 .map(|extension| {
-                    read_vk_string(&extension.extension_name[..])
+                    util::read_vk_string(&extension.extension_name[..])
                         .expect("Reading device extension name")
                 })
                 .collect();
