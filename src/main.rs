@@ -4,14 +4,12 @@ use std::ffi::{c_void, CStr, CString};
 use std::ops::{BitAndAssign, Not};
 use std::os::raw::c_char;
 use std::path::Path;
-use std::string::FromUtf8Error;
 mod debug;
 mod instance;
 mod util;
 
-use ash::extensions::ext::DebugUtils;
 use ash::extensions::khr::{Surface, Win32Surface};
-use ash::vk::{self, ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo};
+use ash::vk::{self, DeviceQueueCreateInfo};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
@@ -87,9 +85,6 @@ struct HelloTriangleApplication {
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
-    debug_loader: Option<ash::extensions::ext::DebugUtils>,
-    debug_messenger_ext: Option<vk::DebugUtilsMessengerEXT>,
-
     swapchain_data: SwapChainData,
     swapchain_image_views: Vec<vk::ImageView>,
 
@@ -113,14 +108,24 @@ struct HelloTriangleApplication {
 impl HelloTriangleApplication {
     pub fn initialize(window: &winit::window::Window, debug: bool) -> Self {
         let entry = unsafe { ash::Entry::new().unwrap() };
-        let instance = HelloTriangleApplication::create_instance(&entry, debug);
 
-        let (debug_loader, debug_messenger_ext) = if debug {
-            let (loader, messenger_ext) =
-                HelloTriangleApplication::create_debug_messenger(&entry, &instance);
-            (Some(loader), Some(messenger_ext))
+        let debug_config = if debug {
+            let mut severities = vk::DebugUtilsMessageSeverityFlagsEXT::all();
+            severities.bitand_assign(vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE.not());
+            Some(debug::Configuration::new(
+                severities,
+                vulkan_debug_utils_callback,
+            ))
         } else {
-            (None, None)
+            None
+        };
+
+        let instance = HelloTriangleApplication::create_instance(&entry, &debug_config);
+        if let Some(mut config) = debug_config {
+            let result = config.create_messenger(&entry, &instance);
+            if result.is_err() {
+                println!("error creating debug messenger: {}", result.unwrap_err())
+            }
         };
 
         // We need a handle to the surface loader so we can call the extension functions
@@ -216,8 +221,6 @@ impl HelloTriangleApplication {
         Self {
             _entry: entry,
             instance,
-            debug_loader,
-            debug_messenger_ext,
             surface,
             surface_loader,
             physical_device,
@@ -244,95 +247,25 @@ impl HelloTriangleApplication {
     /**
     Instance creation
     */
-    fn create_instance(entry: &ash::Entry, debug: bool) -> ash::Instance {
-        // Validate validation layers
-        if debug {
-            HelloTriangleApplication::assert_required_validation_layers_available(&entry)
-        };
-
-        let debug_utils_create_info =
-            HelloTriangleApplication::build_debug_utils_messenger_create_info();
-
-        let layers: Vec<CString> = VALIDATION_LAYERS
-            .iter()
-            .map(|&layer| CString::new(layer).unwrap())
-            .collect();
-        let extensions = vec![
-            Surface::name().to_owned(),
-            Win32Surface::name().to_owned(),
-            // TODO separate loading debug extensions
-            DebugUtils::name().to_owned(),
-        ];
-        let mut extension_inputs = vec![debug_utils_create_info];
-        instance::new(entry, &layers, &extensions, &mut extension_inputs).unwrap()
-    }
-
-    fn assert_required_validation_layers_available(entry: &ash::Entry) {
-        match entry.enumerate_instance_layer_properties() {
-            Ok(layers) => {
-                let layer_names: Vec<String> = layers
-                    .iter()
-                    .map(|layer| util::read_vk_string(&layer.layer_name[..]).unwrap())
-                    .collect();
-
-                layer_names
-                    .iter()
-                    .for_each(|layer| println!("Found validation layer {}", layer));
-
-                let mut unavailable_layers: Vec<&str> = vec![];
-                for layer in VALIDATION_LAYERS.iter() {
-                    if !layer_names.iter().any(|layer_name| layer_name.eq(layer)) {
-                        unavailable_layers.push(layer)
-                    }
-                }
-
-                if unavailable_layers.len() > 0 {
-                    unavailable_layers.iter().for_each(|&layer| {
-                        println!("Required validation layer {} is not available", layer)
-                    });
-
-                    panic!("Could not find required validation layers. See log for details.")
-                }
-            }
-            _ => panic!("Unable to load Vulkan validation layers"),
-        }
-    }
-
-    fn build_debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
-        let mut severities = vk::DebugUtilsMessageSeverityFlagsEXT::all();
-        severities.bitand_assign(vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE.not());
-
-        vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(severities)
-            .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
-            .pfn_user_callback(Some(vulkan_debug_utils_callback))
-            .build()
-    }
-
-    /**
-    Debug Utils validation layer
-    */
-    fn create_debug_messenger(
+    fn create_instance(
         entry: &ash::Entry,
-        instance: &ash::Instance,
-    ) -> (ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT) {
-        println!("Creating debug messenger");
-        let create_info = HelloTriangleApplication::build_debug_utils_messenger_create_info();
-        // This DebugUtils struct loads the extension function for us since debug utils are not a part of the standard
-        // they are not loaded when creating the Entry
-        let debug_utils_loader = ash::extensions::ext::DebugUtils::new(entry, instance);
+        debug_config: &Option<debug::Configuration>,
+    ) -> ash::Instance {
+        let mut layers: Vec<CString> = Vec::new();
+        let mut extensions = vec![Surface::name().to_owned(), Win32Surface::name().to_owned()];
+        let mut extension_inputs = Vec::new();
 
-        println!("Got loader");
+        if let Some(configuration) = debug_config {
+            let instance::Extension { name, data } = configuration.messenger_extension();
+            extensions.push(name);
+            extension_inputs.push(data);
 
-        let messenger = unsafe {
-            debug_utils_loader
-                .create_debug_utils_messenger(&create_info, None)
-                .expect("Debug Utils Callback")
-        };
+            if let Ok(mut validation_layers) = configuration.instance_validation_layers(entry) {
+                layers.append(&mut validation_layers)
+            }
+        }
 
-        println!("Created messenger");
-
-        (debug_utils_loader, messenger)
+        instance::new(entry, &layers, &extensions, &mut extension_inputs).unwrap()
     }
 
     /**
@@ -1309,12 +1242,6 @@ impl Drop for HelloTriangleApplication {
             self.logical_device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
 
-            if let (Some(loader), Some(messenger)) =
-                // FIXME: Not quite sure why this needs to be a ref
-                (self.debug_loader.as_ref(), self.debug_messenger_ext)
-            {
-                loader.destroy_debug_utils_messenger(messenger, None)
-            }
             for &image_view in self.swapchain_image_views.iter() {
                 self.logical_device.destroy_image_view(image_view, None)
             }

@@ -6,6 +6,11 @@ use crate::util;
 
 const APP_TITLE: &str = "Rust Renderer VK";
 
+pub struct Extension<T: vk::ExtendsInstanceCreateInfo> {
+    pub name: CString,
+    pub data: T,
+}
+
 pub fn new<T>(
     entry: &ash::Entry,
     layers: &[CString],
