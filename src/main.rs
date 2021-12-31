@@ -79,6 +79,7 @@ struct HelloTriangleApplication {
     instance: ash::Instance,
     surface: vk::SurfaceKHR,
     surface_loader: ash::extensions::khr::Surface,
+    debug_config: Option<debug::Configuration>,
     physical_device: ash::vk::PhysicalDevice,
     queue_families: QueueFamilyIndices,
     logical_device: ash::Device,
@@ -106,32 +107,28 @@ struct HelloTriangleApplication {
 }
 
 impl HelloTriangleApplication {
-    pub fn initialize(window: &winit::window::Window, debug: bool) -> Self {
+    pub fn initialize(
+        window: &winit::window::Window,
+        debug_config: Option<debug::Configuration>,
+    ) -> Self {
+        let mut debug_config = debug_config;
         let entry = unsafe { ash::Entry::new().unwrap() };
 
-        let debug_config = if debug {
-            let mut severities = vk::DebugUtilsMessageSeverityFlagsEXT::all();
-            severities.bitand_assign(vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE.not());
-            Some(debug::Configuration::new(
-                severities,
-                vulkan_debug_utils_callback,
-            ))
-        } else {
-            None
-        };
-
         let instance = HelloTriangleApplication::create_instance(&entry, &debug_config);
-        if let Some(mut config) = debug_config {
+        for config in debug_config.iter_mut() {
             let result = config.create_messenger(&entry, &instance);
             if result.is_err() {
                 println!("error creating debug messenger: {}", result.unwrap_err())
             }
-        };
+        }
+
+        // TODO Extract surface creation into module
 
         // We need a handle to the surface loader so we can call the extension functions
         let (surface_loader, surface) =
             HelloTriangleApplication::create_win32_surface(&entry, &instance, window);
 
+        // TODO extract physical device selection into module
         let physical_device = match HelloTriangleApplication::pick_physical_device(
             &instance,
             &surface_loader,
@@ -141,6 +138,7 @@ impl HelloTriangleApplication {
             None => panic!("No suitable physical device"),
         };
 
+        // Extract device and queues into module
         let queue_families = HelloTriangleApplication::find_queue_families(
             &instance,
             &physical_device,
@@ -152,7 +150,7 @@ impl HelloTriangleApplication {
             &instance,
             &physical_device,
             &queue_families,
-            debug,
+            debug_config.is_some(),
         );
 
         let graphics_queue = HelloTriangleApplication::get_device_queue(
@@ -220,6 +218,7 @@ impl HelloTriangleApplication {
 
         Self {
             _entry: entry,
+            debug_config,
             instance,
             surface,
             surface_loader,
@@ -1216,6 +1215,9 @@ impl HelloTriangleApplication {
 
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
+        // This forces the debug config to be dropped
+        self.debug_config = None;
+
         unsafe {
             for &semaphore in self.image_available_semaphores.iter() {
                 self.logical_device.destroy_semaphore(semaphore, None);
@@ -1260,6 +1262,17 @@ fn main() {
 
     let event_loop = EventLoop::new();
     let window = HelloTriangleApplication::init_window(&event_loop);
-    let app = HelloTriangleApplication::initialize(&window, debug_layers);
+
+    let debug_config = if debug_layers {
+        let mut severities = vk::DebugUtilsMessageSeverityFlagsEXT::all();
+        severities.bitand_assign(vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE.not());
+        Some(debug::Configuration::new(
+            severities,
+            vulkan_debug_utils_callback,
+        ))
+    } else {
+        None
+    };
+    let app = HelloTriangleApplication::initialize(&window, debug_config);
     app.run(event_loop, window);
 }

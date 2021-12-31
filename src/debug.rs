@@ -13,26 +13,19 @@ pub type DebugMessengerSignature = unsafe extern "system" fn(
     p_user_data: *mut ffi::c_void,
 ) -> vk::Bool32;
 
-pub struct Configuration<'a> {
+pub struct Configuration {
     severities: vk::DebugUtilsMessageSeverityFlagsEXT,
     callback: DebugMessengerSignature,
-    create_info: vk::DebugUtilsMessengerCreateInfoEXTBuilder<'a>,
     loader: Option<ext::DebugUtils>,
     messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
 
-impl<'a> Configuration<'a> {
+impl Configuration {
     pub fn new(
         severities: vk::DebugUtilsMessageSeverityFlagsEXT,
         callback: DebugMessengerSignature,
     ) -> Self {
-        let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(severities)
-            .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
-            .pfn_user_callback(Some(callback));
-
         Self {
-            create_info,
             severities,
             callback,
             loader: None,
@@ -100,8 +93,13 @@ impl<'a> Configuration<'a> {
             None => {
                 let loader = ash::extensions::ext::DebugUtils::new(&entry, &instance);
 
+                let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+                    .message_severity(self.severities)
+                    .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
+                    .pfn_user_callback(Some(self.callback));
+
                 unsafe {
-                    match loader.create_debug_utils_messenger(&self.create_info, None) {
+                    match loader.create_debug_utils_messenger(&create_info, None) {
                         Err(result) => Err(format!("{}", result)),
                         Ok(messenger) => {
                             self.loader = Some(loader);
@@ -115,7 +113,7 @@ impl<'a> Configuration<'a> {
     }
 }
 
-impl<'a> Drop for Configuration<'a> {
+impl Drop for Configuration {
     fn drop(&mut self) {
         if let (Some(loader), Some(messenger)) = (&self.loader, self.messenger) {
             unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
