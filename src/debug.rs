@@ -14,10 +14,10 @@ pub type DebugMessengerSignature = unsafe extern "system" fn(
 ) -> vk::Bool32;
 
 pub struct Configuration {
-    severities: vk::DebugUtilsMessageSeverityFlagsEXT,
-    callback: DebugMessengerSignature,
-    loader: Option<ext::DebugUtils>,
-    messenger: Option<vk::DebugUtilsMessengerEXT>,
+    _severities: vk::DebugUtilsMessageSeverityFlagsEXT,
+    _callback: DebugMessengerSignature,
+    _loader: Option<ext::DebugUtils>,
+    _messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
 
 impl Configuration {
@@ -26,10 +26,10 @@ impl Configuration {
         callback: DebugMessengerSignature,
     ) -> Self {
         Self {
-            severities,
-            callback,
-            loader: None,
-            messenger: None,
+            _severities: severities,
+            _callback: callback,
+            _loader: None,
+            _messenger: None,
         }
     }
 
@@ -72,9 +72,9 @@ impl Configuration {
     pub fn messenger_extension(&self) -> instance::Extension<vk::DebugUtilsMessengerCreateInfoEXT> {
         let name = ext::DebugUtils::name().to_owned();
         let ci = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(self.severities)
+            .message_severity(self._severities)
             .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
-            .pfn_user_callback(Some(self.callback))
+            .pfn_user_callback(Some(self._callback))
             .build();
 
         instance::Extension { name, data: ci }
@@ -86,7 +86,7 @@ impl Configuration {
         entry: &ash::Entry,
         instance: &ash::Instance,
     ) -> Result<vk::DebugUtilsMessengerEXT, String> {
-        match self.loader {
+        match self._loader {
             Some(_) => Err(String::from(
                 "Messenger already configured for a vulkan instance",
             )),
@@ -94,16 +94,16 @@ impl Configuration {
                 let loader = ash::extensions::ext::DebugUtils::new(&entry, &instance);
 
                 let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-                    .message_severity(self.severities)
+                    .message_severity(self._severities)
                     .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
-                    .pfn_user_callback(Some(self.callback));
+                    .pfn_user_callback(Some(self._callback));
 
                 unsafe {
                     match loader.create_debug_utils_messenger(&create_info, None) {
                         Err(result) => Err(format!("{}", result)),
                         Ok(messenger) => {
-                            self.loader = Some(loader);
-                            self.messenger = Some(messenger);
+                            self._loader = Some(loader);
+                            self._messenger = Some(messenger);
                             Ok(messenger)
                         }
                     }
@@ -115,7 +115,7 @@ impl Configuration {
 
 impl Drop for Configuration {
     fn drop(&mut self) {
-        if let (Some(loader), Some(messenger)) = (&self.loader, self.messenger) {
+        if let (Some(loader), Some(messenger)) = (&self._loader, self._messenger) {
             unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
         }
     }
