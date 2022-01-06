@@ -75,6 +75,8 @@ struct SwapChainData {
 }
 
 struct HelloTriangleApplication {
+    window: winit::window::Window,
+
     _entry: ash::Entry,
     instance: ash::Instance,
     surface: vk::SurfaceKHR,
@@ -104,13 +106,17 @@ struct HelloTriangleApplication {
     image_fences: Vec<vk::Fence>,
 
     current_frame: usize,
+
+    frame_buffer_resized: bool,
 }
 
 impl HelloTriangleApplication {
     pub fn initialize(
-        window: &winit::window::Window,
+        event_loop: &EventLoop<()>,
         debug_config: Option<debug::Configuration>,
     ) -> Self {
+        let window = HelloTriangleApplication::init_window(&event_loop);
+
         let mut debug_config = debug_config;
         let entry = unsafe { ash::Entry::new().unwrap() };
 
@@ -126,7 +132,7 @@ impl HelloTriangleApplication {
 
         // We need a handle to the surface loader so we can call the extension functions
         let (surface_loader, surface) =
-            HelloTriangleApplication::create_win32_surface(&entry, &instance, window);
+            HelloTriangleApplication::create_win32_surface(&entry, &instance, &window);
 
         // TODO extract physical device selection into module
         let physical_device = match HelloTriangleApplication::pick_physical_device(
@@ -172,7 +178,7 @@ impl HelloTriangleApplication {
             &surface_loader,
             &physical_device,
             &surface,
-            window,
+            &window,
             &queue_families,
         );
 
@@ -240,6 +246,8 @@ impl HelloTriangleApplication {
             frame_fences,
             image_fences,
             current_frame: 0,
+            window,
+            frame_buffer_resized: false,
         }
     }
 
@@ -1077,6 +1085,91 @@ impl HelloTriangleApplication {
             .expect("Failed to create window.")
     }
 
+    /**
+     * recreate_swapchain re-creates the swapchain and all structures that are dependent on it.
+     */
+    fn recreate_swapchain(&mut self) {
+        unsafe {
+            self.logical_device
+                .device_wait_idle()
+                .expect("Waiting for device to be idle")
+        };
+
+        self.cleanup_swapchain();
+
+        let swapchain_data = HelloTriangleApplication::create_swap_chain(
+            &self.instance,
+            &self.logical_device,
+            &self.surface_loader,
+            &self.physical_device,
+            &self.surface,
+            &self.window,
+            &self.queue_families,
+        );
+        self.swapchain_data = swapchain_data;
+
+        self.swapchain_image_views = HelloTriangleApplication::create_image_views(
+            &self.logical_device,
+            &self.swapchain_data,
+        );
+
+        self.render_pass = HelloTriangleApplication::create_render_pass(
+            &self.logical_device,
+            self.swapchain_data.format,
+        );
+
+        let (graphics_pipeline, pipeline_layout) =
+            HelloTriangleApplication::create_graphics_pipeline(
+                &self.logical_device,
+                self.swapchain_data.extent,
+                self.render_pass,
+            );
+        self.graphics_pipeline = graphics_pipeline;
+        self.pipeline_layout = pipeline_layout;
+
+        self.swap_chain_frame_buffers = HelloTriangleApplication::create_frame_buffers(
+            &self.logical_device,
+            &self.swapchain_image_views,
+            self.swapchain_data.extent,
+            self.render_pass,
+        );
+
+        self.command_buffers = HelloTriangleApplication::create_command_buffers(
+            &self.logical_device,
+            self.command_pool,
+            self.render_pass,
+            &self.swap_chain_frame_buffers,
+            self.swapchain_data.extent,
+            self.graphics_pipeline,
+        );
+    }
+
+    fn cleanup_swapchain(&mut self) {
+        unsafe {
+            for &frame_buffer in self.swap_chain_frame_buffers.iter() {
+                self.logical_device.destroy_framebuffer(frame_buffer, None)
+            }
+
+            self.logical_device
+                .free_command_buffers(self.command_pool, &self.command_buffers);
+
+            self.logical_device
+                .destroy_pipeline(self.graphics_pipeline, None);
+            self.logical_device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.logical_device
+                .destroy_render_pass(self.render_pass, None);
+
+            for &image_view in self.swapchain_image_views.iter() {
+                self.logical_device.destroy_image_view(image_view, None)
+            }
+            self.swapchain_data
+                .loader
+                .destroy_swapchain(self.swapchain_data.swapchain, None);
+        }
+    }
+
+    // TODO: Semaphores not in consistent state when re-creating swapchain when frame buffer is suboptimal
     fn draw_frame(&mut self) {
         // TODO: Wait for fences
         let current_frame_fences = [self.frame_fences[self.current_frame]];
@@ -1087,18 +1180,26 @@ impl HelloTriangleApplication {
         };
 
         // Request an image from the swap chain. It will signal the given semaphore when the image is ready
-        let image_index = unsafe {
-            self.swapchain_data
-                .loader
-                .acquire_next_image(
-                    self.swapchain_data.swapchain,
-                    u64::MAX,
-                    self.image_available_semaphores[self.current_frame],
-                    vk::Fence::null(),
-                )
-                .expect("image index")
-                .0 as usize
+        let (image_index, recreated) = unsafe {
+            match self.swapchain_data.loader.acquire_next_image(
+                self.swapchain_data.swapchain,
+                u64::MAX,
+                self.image_available_semaphores[self.current_frame],
+                vk::Fence::null(),
+            ) {
+                Ok((idx, _)) => (idx as usize, false),
+                // Ok((_, false)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                //     self.recreate_swapchain();
+                //     (0 as usize, true)
+                // }
+                Err(_) => panic!("Failed to acquire swapchain image"),
+            }
         };
+
+        // If the swapchain had to be re-created, exit early and draw again in the next tick.
+        if recreated {
+            return;
+        }
 
         // Make sure we don't reference a swapchain image that is already being presented
         if self.image_fences[image_index] != vk::Fence::null() {
@@ -1160,17 +1261,23 @@ impl HelloTriangleApplication {
             }
         };
 
-        match present_result {
-            Ok(_) => {}
-            Err(result) => {
-                println!("Presentation did not complete: {:?}", result);
+        match (present_result, self.frame_buffer_resized) {
+            (_, true) => {
+                self.recreate_swapchain();
+                self.frame_buffer_resized = false;
             }
+            (Ok(_), _) => (),
+            // (Ok(false), _) | (Err(vk::Result::ERROR_OUT_OF_DATE_KHR), _) => {
+            //     self.recreate_swapchain();
+            //     return;
+            // }
+            (Err(_), _) => panic!("Failed to present swapchain image"),
         }
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-    fn main_loop(mut self, event_loop: EventLoop<()>, window: Window) {
+    fn main_loop(mut self, event_loop: EventLoop<()>) {
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Poll;
 
@@ -1182,6 +1289,10 @@ impl HelloTriangleApplication {
                     println!("The close button was pressed; stopping");
                     *control_flow = ControlFlow::Exit
                 }
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(_),
+                    ..
+                } => self.frame_buffer_resized = true,
                 Event::MainEventsCleared => {
                     // Application update code.
                     // Queue a RedrawRequested event.
@@ -1190,7 +1301,7 @@ impl HelloTriangleApplication {
                     // applications which do not always need to. Applications that redraw continuously
                     // can just render here instead.
 
-                    window.request_redraw()
+                    self.window.request_redraw()
                 }
                 Event::RedrawRequested(_) => {
                     // Redraw the application.
@@ -1208,13 +1319,15 @@ impl HelloTriangleApplication {
         });
     }
 
-    fn run(self, event_loop: EventLoop<()>, window: Window) {
-        self.main_loop(event_loop, window);
+    fn run(self, event_loop: EventLoop<()>) {
+        self.main_loop(event_loop);
     }
 }
 
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
+        self.cleanup_swapchain();
+
         // This forces the debug config to be dropped
         self.debug_config = None;
 
@@ -1233,23 +1346,6 @@ impl Drop for HelloTriangleApplication {
             self.logical_device
                 .destroy_command_pool(self.command_pool, None);
 
-            for &frame_buffer in self.swap_chain_frame_buffers.iter() {
-                self.logical_device.destroy_framebuffer(frame_buffer, None)
-            }
-
-            self.logical_device
-                .destroy_render_pass(self.render_pass, None);
-            self.logical_device
-                .destroy_pipeline(self.graphics_pipeline, None);
-            self.logical_device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-
-            for &image_view in self.swapchain_image_views.iter() {
-                self.logical_device.destroy_image_view(image_view, None)
-            }
-            self.swapchain_data
-                .loader
-                .destroy_swapchain(self.swapchain_data.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.logical_device.destroy_device(None);
             self.instance.destroy_instance(None);
@@ -1261,7 +1357,6 @@ fn main() {
     let debug_layers = true;
 
     let event_loop = EventLoop::new();
-    let window = HelloTriangleApplication::init_window(&event_loop);
 
     let debug_config = if debug_layers {
         let mut severities = vk::DebugUtilsMessageSeverityFlagsEXT::all();
@@ -1273,6 +1368,6 @@ fn main() {
     } else {
         None
     };
-    let app = HelloTriangleApplication::initialize(&window, debug_config);
-    app.run(event_loop, window);
+    let app = HelloTriangleApplication::initialize(&event_loop, debug_config);
+    app.run(event_loop);
 }
