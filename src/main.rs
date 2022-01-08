@@ -1,6 +1,8 @@
 use core::panic;
+use memoffset::offset_of;
 use num::{self, range};
 use std::ffi::{c_void, CStr, CString};
+use std::mem::size_of;
 use std::ops::{BitAndAssign, Not};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -48,6 +50,53 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
     // Return false to indicate that validation should not cause a crash
     vk::FALSE
 }
+
+struct Vertex {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    fn get_binding_desription() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(size_of::<Self>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()
+    }
+
+    fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+        let position_binding = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(offset_of!(Self, pos) as u32)
+            .build();
+        let color_binding = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(1)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(offset_of!(Self, color) as u32)
+            .build();
+
+        [position_binding, color_binding]
+    }
+}
+
+const Vertices: [Vertex; 3] = [
+    Vertex {
+        pos: [0.0, -0.5],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        pos: [0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        pos: [-0.5, 0.5],
+        color: [0.0, 0.0, 1.0],
+    },
+];
 
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
@@ -806,10 +855,12 @@ impl HelloTriangleApplication {
             .name(main_fn_name.as_c_str());
         let shader_stages = vec![vert_stage_builder.build(), frag_stage_builder.build()];
 
+        let binding_description = [Vertex::get_binding_desription()];
+        let attribute_descriptions = Vertex::get_attribute_descriptions();
         // Describe our vertex layout, the input for the vertex shader
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
-            .vertex_binding_descriptions(&[])
-            .vertex_attribute_descriptions(&[]);
+            .vertex_binding_descriptions(&binding_description)
+            .vertex_attribute_descriptions(&attribute_descriptions);
 
         // Describe the primitives we are drawing with our vertices
         let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
