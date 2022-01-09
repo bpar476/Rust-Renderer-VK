@@ -2,7 +2,7 @@ use core::panic;
 use memoffset::offset_of;
 use num::{self, range};
 use std::ffi::{c_void, CStr, CString};
-use std::mem::size_of;
+use std::mem::{self, size_of};
 use std::ops::{BitAndAssign, Not};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -14,7 +14,6 @@ use ash::extensions::khr::{Surface, Win32Surface};
 use ash::vk::{self, DeviceQueueCreateInfo};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::Window;
 
 const APP_TITLE: &str = "Rust Renderer VK";
 const WINDOW_WIDTH: u32 = 800;
@@ -83,13 +82,13 @@ impl Vertex {
     }
 }
 
-const Vertices: [Vertex; 3] = [
+const tri_vertices: [Vertex; 3] = [
     Vertex {
         pos: [0.0, -0.5],
         color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        pos: [0.5, 0.0],
+        pos: [0.5, 0.5],
         color: [0.0, 1.0, 0.0],
     },
     Vertex {
@@ -157,6 +156,9 @@ struct HelloTriangleApplication {
     current_frame: usize,
 
     frame_buffer_resized: bool,
+
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
 }
 
 impl HelloTriangleApplication {
@@ -164,12 +166,12 @@ impl HelloTriangleApplication {
         event_loop: &EventLoop<()>,
         debug_config: Option<debug::Configuration>,
     ) -> Self {
-        let window = HelloTriangleApplication::init_window(&event_loop);
+        let window = Self::init_window(&event_loop);
 
         let mut debug_config = debug_config;
         let entry = unsafe { ash::Entry::new().unwrap() };
 
-        let instance = HelloTriangleApplication::create_instance(&entry, &debug_config);
+        let instance = Self::create_instance(&entry, &debug_config);
         for config in debug_config.iter_mut() {
             let result = config.create_messenger(&entry, &instance);
             if result.is_err() {
@@ -180,48 +182,40 @@ impl HelloTriangleApplication {
         // TODO Extract surface creation into module
 
         // We need a handle to the surface loader so we can call the extension functions
-        let (surface_loader, surface) =
-            HelloTriangleApplication::create_win32_surface(&entry, &instance, &window);
+        let (surface_loader, surface) = Self::create_win32_surface(&entry, &instance, &window);
 
         // TODO extract physical device selection into module
-        let physical_device = match HelloTriangleApplication::pick_physical_device(
-            &instance,
-            &surface_loader,
-            &surface,
-        ) {
+        let physical_device = match Self::pick_physical_device(&instance, &surface_loader, &surface)
+        {
             Some(device) => device,
             None => panic!("No suitable physical device"),
         };
 
         // Extract device and queues into module
-        let queue_families = HelloTriangleApplication::find_queue_families(
-            &instance,
-            &physical_device,
-            &surface_loader,
-            &surface,
-        );
+        let queue_families =
+            Self::find_queue_families(&instance, &physical_device, &surface_loader, &surface);
 
-        let logical_device = HelloTriangleApplication::create_logical_device(
+        let logical_device = Self::create_logical_device(
             &instance,
             &physical_device,
             &queue_families,
             debug_config.is_some(),
         );
 
-        let graphics_queue = HelloTriangleApplication::get_device_queue(
+        let graphics_queue = Self::get_device_queue(
             &logical_device,
             queue_families
                 .graphics_family
                 .expect("Graphics queue family index"),
         );
-        let present_queue = HelloTriangleApplication::get_device_queue(
+        let present_queue = Self::get_device_queue(
             &logical_device,
             queue_families
                 .present_family
                 .expect("Present queue family index"),
         );
 
-        let swapchain_data = HelloTriangleApplication::create_swap_chain(
+        let swapchain_data = Self::create_swap_chain(
             &instance,
             &logical_device,
             &surface_loader,
@@ -231,41 +225,38 @@ impl HelloTriangleApplication {
             &queue_families,
         );
 
-        let swapchain_image_views =
-            HelloTriangleApplication::create_image_views(&logical_device, &swapchain_data);
+        let swapchain_image_views = Self::create_image_views(&logical_device, &swapchain_data);
 
-        let render_pass =
-            HelloTriangleApplication::create_render_pass(&logical_device, swapchain_data.format);
+        let render_pass = Self::create_render_pass(&logical_device, swapchain_data.format);
 
         let (graphics_pipeline, pipeline_layout) =
-            HelloTriangleApplication::create_graphics_pipeline(
-                &logical_device,
-                swapchain_data.extent,
-                render_pass,
-            );
+            Self::create_graphics_pipeline(&logical_device, swapchain_data.extent, render_pass);
 
-        let swap_chain_frame_buffers = HelloTriangleApplication::create_frame_buffers(
+        let swap_chain_frame_buffers = Self::create_frame_buffers(
             &logical_device,
             &swapchain_image_views,
             swapchain_data.extent,
             render_pass,
         );
 
-        let command_pool =
-            HelloTriangleApplication::create_command_pool(&logical_device, &queue_families);
+        let command_pool = Self::create_command_pool(&logical_device, &queue_families);
 
-        let command_buffers = HelloTriangleApplication::create_command_buffers(
+        let (vertex_buffer, vertex_buffer_memory) =
+            Self::create_vertex_buffer(&instance, physical_device, &logical_device, &tri_vertices);
+
+        let command_buffers = Self::create_command_buffers(
             &logical_device,
             command_pool,
             render_pass,
             &swap_chain_frame_buffers,
             swapchain_data.extent,
             graphics_pipeline,
+            vertex_buffer,
         );
 
         // TODO: Handle image in flight fences
         let (image_available_semaphores, render_complete_semaphores, frame_fences) =
-            HelloTriangleApplication::create_synchronisation_primitives(&logical_device);
+            Self::create_synchronisation_primitives(&logical_device);
 
         let image_fences: Vec<vk::Fence> = range(0, swapchain_data.images.len())
             .map(|_| vk::Fence::null())
@@ -297,6 +288,8 @@ impl HelloTriangleApplication {
             current_frame: 0,
             window,
             frame_buffer_resized: false,
+            vertex_buffer,
+            vertex_buffer_memory,
         }
     }
 
@@ -342,12 +335,7 @@ impl HelloTriangleApplication {
                     println!("Found {} devices", devices.len());
                     // TODO confirm device name in use
                     if let Some(device) = devices.iter().find(|&device| {
-                        HelloTriangleApplication::is_device_suitable(
-                            instance,
-                            device,
-                            surface_loader,
-                            surface,
-                        )
+                        Self::is_device_suitable(instance, device, surface_loader, surface)
                     }) {
                         Some(*device)
                     } else {
@@ -368,36 +356,25 @@ impl HelloTriangleApplication {
         let properties = unsafe { instance.get_physical_device_properties(*device) };
         let features = unsafe { instance.get_physical_device_features(*device) };
 
-        let required_device_extensions: Vec<String> =
-            HelloTriangleApplication::get_device_extensions()
-                .iter()
-                .map(|&name| String::from(name.to_str().expect("Swapchain extension name")))
-                .collect();
+        let required_device_extensions: Vec<String> = Self::get_device_extensions()
+            .iter()
+            .map(|&name| String::from(name.to_str().expect("Swapchain extension name")))
+            .collect();
         let required_device_extensions_supported =
-            HelloTriangleApplication::check_device_extension_support(
-                &instance,
-                device,
-                required_device_extensions,
-            );
+            Self::check_device_extension_support(&instance, device, required_device_extensions);
 
         println!(
             "Evaluating suitability of device [{}]",
             util::read_vk_string(&properties.device_name[..]).unwrap()
         );
 
-        let supports_required_families = HelloTriangleApplication::find_queue_families(
-            instance,
-            device,
-            surface_loader,
-            surface,
-        )
-        .is_complete();
+        let supports_required_families =
+            Self::find_queue_families(instance, device, surface_loader, surface).is_complete();
 
         if required_device_extensions_supported {
             // Only check swap chain support if the swap chain device extensions are supported
-            let swap_chain_support = unsafe {
-                HelloTriangleApplication::query_swap_chain_support(surface_loader, device, surface)
-            };
+            let swap_chain_support =
+                unsafe { Self::query_swap_chain_support(surface_loader, device, surface) };
             let swap_chain_adequate = !swap_chain_support.formats.is_empty()
                 && !swap_chain_support.present_modes.is_empty();
 
@@ -517,11 +494,10 @@ impl HelloTriangleApplication {
             .iter()
             .map(|layer_name| layer_name.as_ptr())
             .collect();
-        let enabled_extension_names: Vec<*const c_char> =
-            HelloTriangleApplication::get_device_extensions()
-                .iter()
-                .map(|&name| name.as_ptr())
-                .collect();
+        let enabled_extension_names: Vec<*const c_char> = Self::get_device_extensions()
+            .iter()
+            .map(|&name| name.as_ptr())
+            .collect();
         let device_create_info = if debug {
             vk::DeviceCreateInfo::builder()
                 .queue_create_infos(create_infos)
@@ -654,19 +630,11 @@ impl HelloTriangleApplication {
         window: &winit::window::Window,
         indicies: &QueueFamilyIndices,
     ) -> SwapChainData {
-        let swap_chain_support = unsafe {
-            HelloTriangleApplication::query_swap_chain_support(
-                surface_loader,
-                physical_device,
-                surface,
-            )
-        };
-        let format =
-            HelloTriangleApplication::choose_swap_surface_format(&swap_chain_support.formats);
-        let present_mode =
-            HelloTriangleApplication::choose_swap_present_mode(&swap_chain_support.present_modes);
-        let extent =
-            HelloTriangleApplication::choose_swap_extent(&swap_chain_support.capabilities, window);
+        let swap_chain_support =
+            unsafe { Self::query_swap_chain_support(surface_loader, physical_device, surface) };
+        let format = Self::choose_swap_surface_format(&swap_chain_support.formats);
+        let present_mode = Self::choose_swap_present_mode(&swap_chain_support.present_modes);
+        let extent = Self::choose_swap_extent(&swap_chain_support.capabilities, window);
 
         // Minimum images plus one so we always have an image to draw to while driver is working
         let preferred_image_count = swap_chain_support.capabilities.min_image_count + 1;
@@ -839,10 +807,8 @@ impl HelloTriangleApplication {
         );
         let frag_shader_code = util::read_shader_code(frag_path.as_path());
 
-        let vert_shader_module =
-            HelloTriangleApplication::create_shader_module(device, &vert_shader_code);
-        let frag_shader_module =
-            HelloTriangleApplication::create_shader_module(device, &frag_shader_code);
+        let vert_shader_module = Self::create_shader_module(device, &vert_shader_code);
+        let frag_shader_module = Self::create_shader_module(device, &frag_shader_code);
 
         let main_fn_name = CString::new("main").unwrap();
         let vert_stage_builder = vk::PipelineShaderStageCreateInfo::builder()
@@ -1013,6 +979,85 @@ impl HelloTriangleApplication {
         }
     }
 
+    fn create_vertex_buffer(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        logical_device: &ash::Device,
+        vertex_data: &[Vertex],
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let size = mem::size_of::<Vertex>() * vertex_data.len();
+        let ci = vk::BufferCreateInfo::builder()
+            .size(size as u64)
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let vertex_buffer = unsafe {
+            logical_device
+                .create_buffer(&ci, None)
+                .expect("Creating vertex buffer")
+        };
+
+        let mem_requirements =
+            unsafe { logical_device.get_buffer_memory_requirements(vertex_buffer) };
+        let mem_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+        let required_memory_flags: vk::MemoryPropertyFlags =
+        // Coherency ensures the buffer is visible and writable immediately after memory mapping
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let suitable_memory_type = Self::find_memory_type(
+            mem_requirements.memory_type_bits,
+            required_memory_flags,
+            mem_properties,
+        );
+
+        let alloc_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(mem_requirements.size)
+            .memory_type_index(suitable_memory_type);
+
+        let vertex_buffer_memory = unsafe {
+            logical_device
+                .allocate_memory(&alloc_info, None)
+                .expect("Allocatin vertex buffer memory")
+        };
+        unsafe {
+            logical_device
+                .bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0)
+                .expect("Bind VB memory");
+
+            let data_ptr = logical_device
+                .map_memory(
+                    vertex_buffer_memory,
+                    0,
+                    ci.size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("Failed to Map Memory") as *mut Vertex;
+
+            data_ptr.copy_from_nonoverlapping(tri_vertices.as_ptr(), tri_vertices.len());
+
+            logical_device.unmap_memory(vertex_buffer_memory);
+        }
+
+        (vertex_buffer, vertex_buffer_memory)
+    }
+
+    fn find_memory_type(
+        type_filter: u32,
+        required_properties: vk::MemoryPropertyFlags,
+        mem_properties: vk::PhysicalDeviceMemoryProperties,
+    ) -> u32 {
+        for (i, memory_type) in mem_properties.memory_types.iter().enumerate() {
+            // type_filter are the physical device memory types that we want for our buffer
+            if (type_filter & (1 << i)) > 0
+                && memory_type.property_flags.contains(required_properties)
+            {
+                return i as u32;
+            }
+        }
+
+        panic!("Failed to find suitable memory type!")
+    }
     /// Allocates `num_buffers` command buffers to the given command pool on the given device
     fn create_command_buffers(
         device: &ash::Device,
@@ -1021,6 +1066,7 @@ impl HelloTriangleApplication {
         frame_buffers: &Vec<vk::Framebuffer>,
         swap_chain_extent: vk::Extent2D,
         graphics_pipeline: vk::Pipeline,
+        vertex_buffer: vk::Buffer,
     ) -> Vec<vk::CommandBuffer> {
         let num_buffers = frame_buffers.len();
         if frame_buffers.len() != num_buffers {
@@ -1076,7 +1122,12 @@ impl HelloTriangleApplication {
                     vk::PipelineBindPoint::GRAPHICS,
                     graphics_pipeline,
                 );
-                device.cmd_draw(buffer, 3, 1, 0, 0);
+
+                let buffers = [vertex_buffer];
+                let offsets = [0];
+                device.cmd_bind_vertex_buffers(buffer, 0, &buffers, &offsets);
+
+                device.cmd_draw(buffer, tri_vertices.len() as u32, 1, 0, 0);
 
                 device.cmd_end_render_pass(buffer);
 
@@ -1185,13 +1236,14 @@ impl HelloTriangleApplication {
             self.render_pass,
         );
 
-        self.command_buffers = HelloTriangleApplication::create_command_buffers(
+        self.command_buffers = Self::create_command_buffers(
             &self.logical_device,
             self.command_pool,
             self.render_pass,
             &self.swap_chain_frame_buffers,
             self.swapchain_data.extent,
             self.graphics_pipeline,
+            self.vertex_buffer,
         );
     }
 
@@ -1383,6 +1435,10 @@ impl Drop for HelloTriangleApplication {
         self.debug_config = None;
 
         unsafe {
+            self.logical_device.destroy_buffer(self.vertex_buffer, None);
+            self.logical_device
+                .free_memory(self.vertex_buffer_memory, None);
+
             for &semaphore in self.image_available_semaphores.iter() {
                 self.logical_device.destroy_semaphore(semaphore, None);
             }
