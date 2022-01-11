@@ -1,6 +1,7 @@
 use core::panic;
 use memoffset::offset_of;
 use num::{self, range};
+use std::convert::TryInto;
 use std::ffi::{c_void, CStr, CString};
 use std::mem::{self, size_of};
 use std::ops::{BitAndAssign, Not};
@@ -241,8 +242,14 @@ impl HelloTriangleApplication {
 
         let command_pool = Self::create_command_pool(&logical_device, &queue_families);
 
-        let (vertex_buffer, vertex_buffer_memory) =
-            Self::create_vertex_buffer(&instance, physical_device, &logical_device, &tri_vertices);
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
+            &instance,
+            physical_device,
+            &logical_device,
+            &tri_vertices,
+            command_pool,
+            graphics_queue,
+        );
 
         let command_buffers = Self::create_command_buffers(
             &logical_device,
@@ -982,70 +989,107 @@ impl HelloTriangleApplication {
     fn create_vertex_buffer(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
-        logical_device: &ash::Device,
+        device: &ash::Device,
         vertex_data: &[Vertex],
+        command_pool: vk::CommandPool,
+        submit_queue: vk::Queue,
     ) -> (vk::Buffer, vk::DeviceMemory) {
-        let size = mem::size_of::<Vertex>() * vertex_data.len();
+        let size: u64 = (mem::size_of::<Vertex>() * vertex_data.len())
+            .try_into()
+            .unwrap();
+
+        let mem_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+        let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
+            device,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            &mem_properties,
+        );
+
+        unsafe {
+            let data_ptr = device
+                .map_memory(staging_buffer_memory, 0, size, vk::MemoryMapFlags::empty())
+                .expect("Failed to Map staging buffer Memory")
+                as *mut Vertex;
+
+            data_ptr.copy_from_nonoverlapping(tri_vertices.as_ptr(), tri_vertices.len());
+
+            device.unmap_memory(staging_buffer_memory);
+        }
+
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer(
+            device,
+            size,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            &mem_properties,
+        );
+
+        Self::copy_buffer(
+            device,
+            submit_queue,
+            command_pool,
+            staging_buffer,
+            vertex_buffer,
+            size,
+        );
+
+        unsafe { device.destroy_buffer(staging_buffer, None) };
+        unsafe { device.free_memory(staging_buffer_memory, None) };
+
+        (vertex_buffer, vertex_buffer_memory)
+    }
+
+    fn create_buffer(
+        device: &ash::Device,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        required_memory_properties: vk::MemoryPropertyFlags,
+        device_memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
         let ci = vk::BufferCreateInfo::builder()
             .size(size as u64)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let vertex_buffer = unsafe {
-            logical_device
+        let buffer = unsafe {
+            device
                 .create_buffer(&ci, None)
                 .expect("Creating vertex buffer")
         };
 
-        let mem_requirements =
-            unsafe { logical_device.get_buffer_memory_requirements(vertex_buffer) };
-        let mem_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
-        let required_memory_flags: vk::MemoryPropertyFlags =
-        // Coherency ensures the buffer is visible and writable immediately after memory mapping
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         let suitable_memory_type = Self::find_memory_type(
             mem_requirements.memory_type_bits,
-            required_memory_flags,
-            mem_properties,
+            required_memory_properties,
+            device_memory_properties,
         );
 
         let alloc_info = vk::MemoryAllocateInfo::builder()
             .allocation_size(mem_requirements.size)
             .memory_type_index(suitable_memory_type);
 
-        let vertex_buffer_memory = unsafe {
-            logical_device
+        let buffer_memory = unsafe {
+            device
                 .allocate_memory(&alloc_info, None)
                 .expect("Allocatin vertex buffer memory")
         };
         unsafe {
-            logical_device
-                .bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0)
-                .expect("Bind VB memory");
+            device
+                .bind_buffer_memory(buffer, buffer_memory, 0)
+                .expect("Bind buffer memory");
+        };
 
-            let data_ptr = logical_device
-                .map_memory(
-                    vertex_buffer_memory,
-                    0,
-                    ci.size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .expect("Failed to Map Memory") as *mut Vertex;
-
-            data_ptr.copy_from_nonoverlapping(tri_vertices.as_ptr(), tri_vertices.len());
-
-            logical_device.unmap_memory(vertex_buffer_memory);
-        }
-
-        (vertex_buffer, vertex_buffer_memory)
+        (buffer, buffer_memory)
     }
 
     fn find_memory_type(
         type_filter: u32,
         required_properties: vk::MemoryPropertyFlags,
-        mem_properties: vk::PhysicalDeviceMemoryProperties,
+        mem_properties: &vk::PhysicalDeviceMemoryProperties,
     ) -> u32 {
         for (i, memory_type) in mem_properties.memory_types.iter().enumerate() {
             // type_filter are the physical device memory types that we want for our buffer
@@ -1058,6 +1102,56 @@ impl HelloTriangleApplication {
 
         panic!("Failed to find suitable memory type!")
     }
+
+    fn copy_buffer(
+        device: &ash::Device,
+        queue: vk::Queue,
+        pool: vk::CommandPool,
+        source: vk::Buffer,
+        destination: vk::Buffer,
+        size: vk::DeviceSize,
+    ) {
+        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(pool)
+            .command_buffer_count(1);
+
+        let command_buffer = unsafe {
+            device
+                .allocate_command_buffers(&alloc_info)
+                .map(|b| b[0])
+                .expect("Allocating buffer copy command buffer")
+        };
+
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let copy_regions = [vk::BufferCopy::builder()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(size)
+            .build()];
+        let buffers = [command_buffer];
+        let submit_info = vk::SubmitInfo::builder().command_buffers(&buffers);
+        unsafe {
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .expect("begin recording buffer copy command buffer");
+
+            device.cmd_copy_buffer(command_buffer, source, destination, &copy_regions);
+
+            device
+                .end_command_buffer(command_buffer)
+                .expect("End copy command buffer");
+
+            device
+                .queue_submit(queue, &[submit_info.build()], vk::Fence::null())
+                .expect("Submit buffer copy");
+            device.queue_wait_idle(queue).unwrap();
+
+            device.free_command_buffers(pool, &buffers)
+        };
+    }
+
     /// Allocates `num_buffers` command buffers to the given command pool on the given device
     fn create_command_buffers(
         device: &ash::Device,
