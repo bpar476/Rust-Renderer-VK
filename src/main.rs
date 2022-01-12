@@ -83,20 +83,26 @@ impl Vertex {
     }
 }
 
-const tri_vertices: [Vertex; 3] = [
+const QUAD_VERTICES: [Vertex; 4] = [
     Vertex {
-        pos: [0.0, -0.5],
+        pos: [-0.5, -0.5],
         color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        pos: [0.5, 0.5],
+        pos: [0.5, -0.5],
         color: [0.0, 1.0, 0.0],
     },
     Vertex {
-        pos: [-0.5, 0.5],
+        pos: [0.5, 0.5],
         color: [0.0, 0.0, 1.0],
     },
+    Vertex {
+        pos: [-0.5, 0.5],
+        color: [1.0, 1.0, 1.0],
+    },
 ];
+
+const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
@@ -160,6 +166,9 @@ struct HelloTriangleApplication {
 
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
+
+    index_buffer: vk::Buffer,
+    index_buffer_memory: vk::DeviceMemory,
 }
 
 impl HelloTriangleApplication {
@@ -246,7 +255,16 @@ impl HelloTriangleApplication {
             &instance,
             physical_device,
             &logical_device,
-            &tri_vertices,
+            &QUAD_VERTICES,
+            command_pool,
+            graphics_queue,
+        );
+
+        let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
+            &instance,
+            physical_device,
+            &logical_device,
+            &QUAD_INDICES,
             command_pool,
             graphics_queue,
         );
@@ -259,6 +277,7 @@ impl HelloTriangleApplication {
             swapchain_data.extent,
             graphics_pipeline,
             vertex_buffer,
+            index_buffer,
         );
 
         // TODO: Handle image in flight fences
@@ -297,6 +316,8 @@ impl HelloTriangleApplication {
             frame_buffer_resized: false,
             vertex_buffer,
             vertex_buffer_memory,
+            index_buffer,
+            index_buffer_memory,
         }
     }
 
@@ -1015,7 +1036,7 @@ impl HelloTriangleApplication {
                 .expect("Failed to Map staging buffer Memory")
                 as *mut Vertex;
 
-            data_ptr.copy_from_nonoverlapping(tri_vertices.as_ptr(), tri_vertices.len());
+            data_ptr.copy_from_nonoverlapping(QUAD_VERTICES.as_ptr(), QUAD_VERTICES.len());
 
             device.unmap_memory(staging_buffer_memory);
         }
@@ -1041,6 +1062,70 @@ impl HelloTriangleApplication {
         unsafe { device.free_memory(staging_buffer_memory, None) };
 
         (vertex_buffer, vertex_buffer_memory)
+    }
+
+    // TODO: Create generic "create device local buffer" method. Usage should be parameter.
+    fn create_index_buffer(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        device: &ash::Device,
+        index_data: &[u16],
+        command_pool: vk::CommandPool,
+        submit_queue: vk::Queue,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let length = index_data.len();
+        if length == 0 {
+            panic!("Empy index data")
+        }
+        let size = mem::size_of::<u16>() * index_data.len();
+        let mem_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+        let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
+            device,
+            size as u64,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            &mem_properties,
+        );
+
+        unsafe {
+            let data_ptr = device
+                .map_memory(
+                    staging_buffer_memory,
+                    0,
+                    size as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("Failed to Map staging buffer Memory")
+                as *mut u16;
+
+            data_ptr.copy_from_nonoverlapping(QUAD_INDICES.as_ptr(), QUAD_INDICES.len());
+
+            device.unmap_memory(staging_buffer_memory);
+        }
+
+        let (index_buffer, index_buffer_memory) = Self::create_buffer(
+            device,
+            size as u64,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            &mem_properties,
+        );
+
+        Self::copy_buffer(
+            device,
+            submit_queue,
+            command_pool,
+            staging_buffer,
+            index_buffer,
+            size as u64,
+        );
+
+        unsafe { device.destroy_buffer(staging_buffer, None) };
+        unsafe { device.free_memory(staging_buffer_memory, None) };
+
+        (index_buffer, index_buffer_memory)
     }
 
     fn create_buffer(
@@ -1152,7 +1237,8 @@ impl HelloTriangleApplication {
         };
     }
 
-    /// Allocates `num_buffers` command buffers to the given command pool on the given device
+    /// Allocates `num_buffers` command buffers to the given command pool on the given device. Records all commands required to render a frame from
+    /// the vertex and index data.
     fn create_command_buffers(
         device: &ash::Device,
         command_pool: vk::CommandPool,
@@ -1161,6 +1247,7 @@ impl HelloTriangleApplication {
         swap_chain_extent: vk::Extent2D,
         graphics_pipeline: vk::Pipeline,
         vertex_buffer: vk::Buffer,
+        index_buffer: vk::Buffer,
     ) -> Vec<vk::CommandBuffer> {
         let num_buffers = frame_buffers.len();
         if frame_buffers.len() != num_buffers {
@@ -1220,8 +1307,9 @@ impl HelloTriangleApplication {
                 let buffers = [vertex_buffer];
                 let offsets = [0];
                 device.cmd_bind_vertex_buffers(buffer, 0, &buffers, &offsets);
+                device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT16);
 
-                device.cmd_draw(buffer, tri_vertices.len() as u32, 1, 0, 0);
+                device.cmd_draw_indexed(buffer, QUAD_INDICES.len() as u32, 1, 0, 0, 0);
 
                 device.cmd_end_render_pass(buffer);
 
@@ -1338,6 +1426,7 @@ impl HelloTriangleApplication {
             self.swapchain_data.extent,
             self.graphics_pipeline,
             self.vertex_buffer,
+            self.index_buffer,
         );
     }
 
@@ -1532,6 +1621,9 @@ impl Drop for HelloTriangleApplication {
             self.logical_device.destroy_buffer(self.vertex_buffer, None);
             self.logical_device
                 .free_memory(self.vertex_buffer_memory, None);
+            self.logical_device.destroy_buffer(self.index_buffer, None);
+            self.logical_device
+                .free_memory(self.index_buffer_memory, None);
 
             for &semaphore in self.image_available_semaphores.iter() {
                 self.logical_device.destroy_semaphore(semaphore, None);
