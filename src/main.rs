@@ -1,3 +1,4 @@
+use cgmath::Matrix4;
 use core::panic;
 use memoffset::offset_of;
 use num::{self, range};
@@ -49,6 +50,12 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
 
     // Return false to indicate that validation should not cause a crash
     vk::FALSE
+}
+
+struct UniformBufferObject {
+    model: Matrix4<f32>,
+    view: Matrix4<f32>,
+    perspective: Matrix4<f32>,
 }
 
 struct Vertex {
@@ -146,6 +153,8 @@ struct HelloTriangleApplication {
     swapchain_data: SwapChainData,
     swapchain_image_views: Vec<vk::ImageView>,
 
+    descriptor_set_layout: vk::DescriptorSetLayout,
+
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
@@ -239,8 +248,14 @@ impl HelloTriangleApplication {
 
         let render_pass = Self::create_render_pass(&logical_device, swapchain_data.format);
 
-        let (graphics_pipeline, pipeline_layout) =
-            Self::create_graphics_pipeline(&logical_device, swapchain_data.extent, render_pass);
+        let descriptor_set_layout = Self::create_descriptor_set_layout(&logical_device);
+
+        let (graphics_pipeline, pipeline_layout) = Self::create_graphics_pipeline(
+            &logical_device,
+            swapchain_data.extent,
+            render_pass,
+            descriptor_set_layout,
+        );
 
         let swap_chain_frame_buffers = Self::create_frame_buffers(
             &logical_device,
@@ -302,6 +317,7 @@ impl HelloTriangleApplication {
             swapchain_data,
             swapchain_image_views,
             render_pass,
+            descriptor_set_layout,
             pipeline_layout,
             graphics_pipeline,
             swap_chain_frame_buffers,
@@ -817,10 +833,27 @@ impl HelloTriangleApplication {
         }
     }
 
+    fn create_descriptor_set_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+        let ubo_layout_binding = vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+
+        let bindings = [ubo_layout_binding.build()];
+        let ci = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+        unsafe {
+            device
+                .create_descriptor_set_layout(&ci, None)
+                .expect("Failed to create descriptor set layout!")
+        }
+    }
+
     fn create_graphics_pipeline(
         device: &ash::Device,
         swap_chain_extents: vk::Extent2D,
         render_pass: vk::RenderPass,
+        descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> (vk::Pipeline, vk::PipelineLayout) {
         let vert_path = Path::new(env!("OUT_DIR")).join("vert.spv");
         println!(
@@ -913,7 +946,9 @@ impl HelloTriangleApplication {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(dynamic_states);
 
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
+        let set_layouts = [descriptor_set_layout];
+        let pipeline_layout_info =
+            vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(&pipeline_layout_info, None)
@@ -1407,6 +1442,7 @@ impl HelloTriangleApplication {
                 &self.logical_device,
                 self.swapchain_data.extent,
                 self.render_pass,
+                self.descriptor_set_layout,
             );
         self.graphics_pipeline = graphics_pipeline;
         self.pipeline_layout = pipeline_layout;
@@ -1618,6 +1654,8 @@ impl Drop for HelloTriangleApplication {
         self.debug_config = None;
 
         unsafe {
+            self.logical_device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             self.logical_device.destroy_buffer(self.vertex_buffer, None);
             self.logical_device
                 .free_memory(self.vertex_buffer_memory, None);
