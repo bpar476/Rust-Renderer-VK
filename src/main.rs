@@ -1,4 +1,4 @@
-use cgmath::Matrix4;
+use cgmath::{Deg, Euler, Matrix4, Point3, Rad, Vector3};
 use core::panic;
 use memoffset::offset_of;
 use num::{self, range};
@@ -8,6 +8,7 @@ use std::mem::{self, size_of};
 use std::ops::{BitAndAssign, Not};
 use std::os::raw::c_char;
 use std::path::Path;
+use std::time::Instant;
 mod debug;
 mod instance;
 mod util;
@@ -145,6 +146,7 @@ struct HelloTriangleApplication {
     surface_loader: ash::extensions::khr::Surface,
     debug_config: Option<debug::Configuration>,
     physical_device: ash::vk::PhysicalDevice,
+    physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     queue_families: QueueFamilyIndices,
     logical_device: ash::Device,
     graphics_queue: vk::Queue,
@@ -178,6 +180,11 @@ struct HelloTriangleApplication {
 
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
+
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
+
+    start_time: Instant,
 }
 
 impl HelloTriangleApplication {
@@ -266,22 +273,31 @@ impl HelloTriangleApplication {
 
         let command_pool = Self::create_command_pool(&logical_device, &queue_families);
 
+        let physical_device_memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
         let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
             &instance,
-            physical_device,
             &logical_device,
             &QUAD_VERTICES,
             command_pool,
             graphics_queue,
+            physical_device_memory_properties,
         );
 
         let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
             &instance,
-            physical_device,
             &logical_device,
             &QUAD_INDICES,
             command_pool,
             graphics_queue,
+            physical_device_memory_properties,
+        );
+
+        let (uniform_buffers, uniform_buffers_memory) = Self::create_uniform_buffers(
+            &logical_device,
+            physical_device_memory_properties,
+            swapchain_image_views.len(),
         );
 
         let command_buffers = Self::create_command_buffers(
@@ -310,6 +326,7 @@ impl HelloTriangleApplication {
             surface,
             surface_loader,
             physical_device,
+            physical_device_memory_properties,
             queue_families,
             logical_device,
             graphics_queue,
@@ -334,6 +351,9 @@ impl HelloTriangleApplication {
             vertex_buffer_memory,
             index_buffer,
             index_buffer_memory,
+            uniform_buffers,
+            uniform_buffers_memory,
+            start_time: Instant::now(),
         }
     }
 
@@ -1044,25 +1064,22 @@ impl HelloTriangleApplication {
 
     fn create_vertex_buffer(
         instance: &ash::Instance,
-        physical_device: vk::PhysicalDevice,
         device: &ash::Device,
         vertex_data: &[Vertex],
         command_pool: vk::CommandPool,
         submit_queue: vk::Queue,
+        device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     ) -> (vk::Buffer, vk::DeviceMemory) {
         let size: u64 = (mem::size_of::<Vertex>() * vertex_data.len())
             .try_into()
             .unwrap();
-
-        let mem_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
             device,
             size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            &mem_properties,
+            &device_memory_properties,
         );
 
         unsafe {
@@ -1081,7 +1098,7 @@ impl HelloTriangleApplication {
             size,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &mem_properties,
+            &device_memory_properties,
         );
 
         Self::copy_buffer(
@@ -1102,26 +1119,24 @@ impl HelloTriangleApplication {
     // TODO: Create generic "create device local buffer" method. Usage should be parameter.
     fn create_index_buffer(
         instance: &ash::Instance,
-        physical_device: vk::PhysicalDevice,
         device: &ash::Device,
         index_data: &[u16],
         command_pool: vk::CommandPool,
         submit_queue: vk::Queue,
+        device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     ) -> (vk::Buffer, vk::DeviceMemory) {
         let length = index_data.len();
         if length == 0 {
             panic!("Empy index data")
         }
         let size = mem::size_of::<u16>() * index_data.len();
-        let mem_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
             device,
             size as u64,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
-            &mem_properties,
+            &device_memory_properties,
         );
 
         unsafe {
@@ -1145,7 +1160,7 @@ impl HelloTriangleApplication {
             size as u64,
             vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &mem_properties,
+            &device_memory_properties,
         );
 
         Self::copy_buffer(
@@ -1161,6 +1176,29 @@ impl HelloTriangleApplication {
         unsafe { device.free_memory(staging_buffer_memory, None) };
 
         (index_buffer, index_buffer_memory)
+    }
+
+    fn create_uniform_buffers(
+        device: &ash::Device,
+        device_memory_properties: vk::PhysicalDeviceMemoryProperties,
+        num_buffers: usize,
+    ) -> (Vec<vk::Buffer>, Vec<vk::DeviceMemory>) {
+        let buffer_size = mem::size_of::<UniformBufferObject>() as u64;
+
+        let memory_properties =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        num::range(0, num_buffers)
+            .map(|_| {
+                Self::create_buffer(
+                    device,
+                    buffer_size,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    memory_properties,
+                    &device_memory_properties,
+                )
+            })
+            .unzip()
     }
 
     fn create_buffer(
@@ -1416,7 +1454,7 @@ impl HelloTriangleApplication {
 
         self.cleanup_swapchain();
 
-        let swapchain_data = HelloTriangleApplication::create_swap_chain(
+        let swapchain_data = Self::create_swap_chain(
             &self.instance,
             &self.logical_device,
             &self.surface_loader,
@@ -1427,32 +1465,35 @@ impl HelloTriangleApplication {
         );
         self.swapchain_data = swapchain_data;
 
-        self.swapchain_image_views = HelloTriangleApplication::create_image_views(
-            &self.logical_device,
-            &self.swapchain_data,
-        );
+        self.swapchain_image_views =
+            Self::create_image_views(&self.logical_device, &self.swapchain_data);
 
-        self.render_pass = HelloTriangleApplication::create_render_pass(
-            &self.logical_device,
-            self.swapchain_data.format,
-        );
+        self.render_pass =
+            Self::create_render_pass(&self.logical_device, self.swapchain_data.format);
 
-        let (graphics_pipeline, pipeline_layout) =
-            HelloTriangleApplication::create_graphics_pipeline(
-                &self.logical_device,
-                self.swapchain_data.extent,
-                self.render_pass,
-                self.descriptor_set_layout,
-            );
+        let (graphics_pipeline, pipeline_layout) = Self::create_graphics_pipeline(
+            &self.logical_device,
+            self.swapchain_data.extent,
+            self.render_pass,
+            self.descriptor_set_layout,
+        );
         self.graphics_pipeline = graphics_pipeline;
         self.pipeline_layout = pipeline_layout;
 
-        self.swap_chain_frame_buffers = HelloTriangleApplication::create_frame_buffers(
+        self.swap_chain_frame_buffers = Self::create_frame_buffers(
             &self.logical_device,
             &self.swapchain_image_views,
             self.swapchain_data.extent,
             self.render_pass,
         );
+
+        let (uniform_buffers, uniform_buffers_memory) = Self::create_uniform_buffers(
+            &self.logical_device,
+            self.physical_device_memory_properties,
+            self.swapchain_image_views.len(),
+        );
+        self.uniform_buffers = uniform_buffers;
+        self.uniform_buffers_memory = uniform_buffers_memory;
 
         self.command_buffers = Self::create_command_buffers(
             &self.logical_device,
@@ -1470,6 +1511,14 @@ impl HelloTriangleApplication {
         unsafe {
             for &frame_buffer in self.swap_chain_frame_buffers.iter() {
                 self.logical_device.destroy_framebuffer(frame_buffer, None)
+            }
+
+            for &buffer in self.uniform_buffers.iter() {
+                self.logical_device.destroy_buffer(buffer, None)
+            }
+
+            for &buffer_memory in self.uniform_buffers_memory.iter() {
+                self.logical_device.free_memory(buffer_memory, None)
             }
 
             self.logical_device
@@ -1597,6 +1646,51 @@ impl HelloTriangleApplication {
         }
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    fn update_uniform_buffer(&self, current_image: usize) {
+        let current_time = Instant::now();
+        let time = current_time - self.start_time;
+
+        let rot = Matrix4::from(Euler {
+            x: Deg(0f32),
+            y: Deg(0f32),
+            z: Deg(90f32),
+        }) * time.as_secs_f32();
+        let view = Matrix4::<f32>::look_at_rh(
+            Point3::new(2.0, 2.0, 2.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        );
+        let extent = self.swapchain_data.extent;
+        let aspect_ratio = extent.width as f32 / extent.height as f32;
+        let proj = cgmath::perspective(Deg(45.0), aspect_ratio, 0.1, 10.0);
+
+        // We put them in an array so we can get a raw pointer to this data.
+        let ubos = [UniformBufferObject {
+            model: rot,
+            view,
+            perspective: proj,
+        }];
+
+        let buffer_size = (std::mem::size_of::<UniformBufferObject>() * ubos.len()) as u64;
+
+        unsafe {
+            let data_ptr =
+                self.logical_device
+                    .map_memory(
+                        self.uniform_buffers_memory[current_image],
+                        0,
+                        buffer_size,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .expect("Failed to Map Memory") as *mut UniformBufferObject;
+
+            data_ptr.copy_from_nonoverlapping(ubos.as_ptr(), ubos.len());
+
+            self.logical_device
+                .unmap_memory(self.uniform_buffers_memory[current_image]);
+        }
     }
 
     fn main_loop(mut self, event_loop: EventLoop<()>) {
