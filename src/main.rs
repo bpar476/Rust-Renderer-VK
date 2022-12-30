@@ -53,6 +53,8 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
     vk::FALSE
 }
 
+#[repr(C)]
+#[derive(Clone, Debug, Copy)]
 struct UniformBufferObject {
     model: Matrix4<f32>,
     view: Matrix4<f32>,
@@ -155,6 +157,8 @@ struct HelloTriangleApplication {
     swapchain_data: SwapChainData,
     swapchain_image_views: Vec<vk::ImageView>,
 
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
     descriptor_set_layout: vk::DescriptorSetLayout,
 
     render_pass: vk::RenderPass,
@@ -300,6 +304,21 @@ impl HelloTriangleApplication {
             swapchain_image_views.len(),
         );
 
+        let descriptor_pool =
+            Self::create_descriptor_pool(&logical_device, swapchain_image_views.len());
+        let descriptor_sets = Self::create_descriptor_sets(
+            &logical_device,
+            descriptor_pool,
+            descriptor_set_layout,
+            swapchain_image_views.len(),
+        );
+        Self::populate_descriptor_sets(
+            &logical_device,
+            &descriptor_sets,
+            &uniform_buffers,
+            swapchain_image_views.len(),
+        );
+
         let command_buffers = Self::create_command_buffers(
             &logical_device,
             command_pool,
@@ -309,6 +328,8 @@ impl HelloTriangleApplication {
             graphics_pipeline,
             vertex_buffer,
             index_buffer,
+            pipeline_layout,
+            &descriptor_sets,
         );
 
         // TODO: Handle image in flight fences
@@ -334,6 +355,8 @@ impl HelloTriangleApplication {
             swapchain_data,
             swapchain_image_views,
             render_pass,
+            descriptor_pool,
+            descriptor_sets,
             descriptor_set_layout,
             pipeline_layout,
             graphics_pipeline,
@@ -1310,6 +1333,72 @@ impl HelloTriangleApplication {
         };
     }
 
+    fn create_descriptor_pool(device: &ash::Device, size: usize) -> vk::DescriptorPool {
+        let pool_sizes = [vk::DescriptorPoolSize::builder()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(size as u32)
+            .build()];
+
+        // We can set a flag that allows us to free descriptor sets, but we won't need that
+        let ci = vk::DescriptorPoolCreateInfo::builder()
+            .pool_sizes(&pool_sizes)
+            .max_sets(size as u32);
+
+        unsafe {
+            device
+                .create_descriptor_pool(&ci, None)
+                .expect("Creating descriptor pool")
+        }
+    }
+
+    fn create_descriptor_sets(
+        device: &ash::Device,
+        pool: vk::DescriptorPool,
+        layout_template: vk::DescriptorSetLayout,
+        size: usize,
+    ) -> Vec<vk::DescriptorSet> {
+        let mut layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
+
+        // Every frame uses the same descriptor layout
+        for _ in 0..size {
+            layouts.push(layout_template.clone());
+        }
+        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(pool)
+            .set_layouts(&layouts);
+
+        unsafe {
+            device
+                .allocate_descriptor_sets(&alloc_info)
+                .expect("allocating descriptor sets")
+        }
+    }
+
+    fn populate_descriptor_sets(
+        device: &ash::Device,
+        descriptor_sets: &Vec<vk::DescriptorSet>,
+        uniform_buffers: &Vec<vk::Buffer>,
+        size: usize,
+    ) {
+        for i in 0..size {
+            let bi = [vk::DescriptorBufferInfo::builder()
+                .buffer(uniform_buffers[i])
+                .offset(0)
+                .range(mem::size_of::<UniformBufferObject>() as u64)
+                .build()];
+
+            let write = [vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_sets[i])
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&bi)
+                .build()];
+
+            unsafe { device.update_descriptor_sets(&write, &[]) };
+        }
+    }
+
     /// Allocates `num_buffers` command buffers to the given command pool on the given device. Records all commands required to render a frame from
     /// the vertex and index data.
     fn create_command_buffers(
@@ -1321,11 +1410,16 @@ impl HelloTriangleApplication {
         graphics_pipeline: vk::Pipeline,
         vertex_buffer: vk::Buffer,
         index_buffer: vk::Buffer,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_sets: &Vec<vk::DescriptorSet>,
     ) -> Vec<vk::CommandBuffer> {
         let num_buffers = frame_buffers.len();
         if frame_buffers.len() != num_buffers {
             panic!("Must have same number of command buffers as frame buffers")
         }
+
+        println!("Num buffers: {}", num_buffers);
+        println!("Num descriptor sets: {}", descriptor_sets.len());
 
         let ci = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
@@ -1381,6 +1475,16 @@ impl HelloTriangleApplication {
                 let offsets = [0];
                 device.cmd_bind_vertex_buffers(buffer, 0, &buffers, &offsets);
                 device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT16);
+
+                let sets = [descriptor_sets[i]];
+                device.cmd_bind_descriptor_sets(
+                    buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    0,
+                    &sets,
+                    &[],
+                );
 
                 device.cmd_draw_indexed(buffer, QUAD_INDICES.len() as u32, 1, 0, 0, 0);
 
@@ -1495,6 +1599,21 @@ impl HelloTriangleApplication {
         self.uniform_buffers = uniform_buffers;
         self.uniform_buffers_memory = uniform_buffers_memory;
 
+        self.descriptor_pool =
+            Self::create_descriptor_pool(&self.logical_device, self.swapchain_image_views.len());
+        self.descriptor_sets = Self::create_descriptor_sets(
+            &self.logical_device,
+            self.descriptor_pool,
+            self.descriptor_set_layout,
+            self.swapchain_image_views.len(),
+        );
+        Self::populate_descriptor_sets(
+            &self.logical_device,
+            &self.descriptor_sets,
+            &self.uniform_buffers,
+            self.swapchain_image_views.len(),
+        );
+
         self.command_buffers = Self::create_command_buffers(
             &self.logical_device,
             self.command_pool,
@@ -1504,6 +1623,8 @@ impl HelloTriangleApplication {
             self.graphics_pipeline,
             self.vertex_buffer,
             self.index_buffer,
+            self.pipeline_layout,
+            &self.descriptor_sets,
         );
     }
 
@@ -1520,6 +1641,9 @@ impl HelloTriangleApplication {
             for &buffer_memory in self.uniform_buffers_memory.iter() {
                 self.logical_device.free_memory(buffer_memory, None)
             }
+
+            self.logical_device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
 
             self.logical_device
                 .free_command_buffers(self.command_pool, &self.command_buffers);
@@ -1572,6 +1696,8 @@ impl HelloTriangleApplication {
             return;
         }
 
+        self.update_uniform_buffer(image_index);
+
         // Make sure we don't reference a swapchain image that is already being presented
         if self.image_fences[image_index] != vk::Fence::null() {
             let active_image_in_flight_fences = [self.image_fences[image_index]];
@@ -1587,6 +1713,7 @@ impl HelloTriangleApplication {
         let render_signal_semaphores = [self.render_complete_semaphores[self.current_frame]];
         let wait_stage = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let command_buffers = [self.command_buffers[image_index]];
+
         // Submit info is data representing a request to a queue and how to synchronise it with other requests
         // Tells vulkan to wait at the "color attachment" point until the image_available_semaphore has signaled,
         // then run the command buffer. Once the commands are complete, signal the "render_complete_semaphore".
@@ -1634,7 +1761,7 @@ impl HelloTriangleApplication {
 
         match (present_result, self.frame_buffer_resized) {
             (_, true) => {
-                self.recreate_swapchain();
+                // self.recreate_swapchain();
                 self.frame_buffer_resized = false;
             }
             (Ok(_), _) => (),
@@ -1655,7 +1782,7 @@ impl HelloTriangleApplication {
         let rot = Matrix4::from(Euler {
             x: Deg(0f32),
             y: Deg(0f32),
-            z: Deg(90f32),
+            z: Deg(45f32),
         }) * time.as_secs_f32();
         let view = Matrix4::<f32>::look_at_rh(
             Point3::new(2.0, 2.0, 2.0),
@@ -1665,6 +1792,8 @@ impl HelloTriangleApplication {
         let extent = self.swapchain_data.extent;
         let aspect_ratio = extent.width as f32 / extent.height as f32;
         let proj = cgmath::perspective(Deg(45.0), aspect_ratio, 0.1, 10.0);
+
+        println!("Setting rotation to {:?}", rot);
 
         // We put them in an array so we can get a raw pointer to this data.
         let ubos = [UniformBufferObject {
