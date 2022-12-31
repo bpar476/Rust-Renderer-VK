@@ -1418,9 +1418,6 @@ impl HelloTriangleApplication {
             panic!("Must have same number of command buffers as frame buffers")
         }
 
-        println!("Num buffers: {}", num_buffers);
-        println!("Num descriptor sets: {}", descriptor_sets.len());
-
         let ci = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
             // Primary command buffer is submitted directly to queue, cannot be called from other command buffers.
@@ -1782,8 +1779,8 @@ impl HelloTriangleApplication {
         let rot = Matrix4::from(Euler {
             x: Deg(0f32),
             y: Deg(0f32),
-            z: Deg(45f32),
-        }) * time.as_secs_f32();
+            z: Deg(45f32) * time.as_secs_f32(),
+        });
         let view = Matrix4::<f32>::look_at_rh(
             Point3::new(2.0, 2.0, 2.0),
             Point3::new(0.0, 0.0, 0.0),
@@ -1792,8 +1789,6 @@ impl HelloTriangleApplication {
         let extent = self.swapchain_data.extent;
         let aspect_ratio = extent.width as f32 / extent.height as f32;
         let proj = cgmath::perspective(Deg(45.0), aspect_ratio, 0.1, 10.0);
-
-        println!("Setting rotation to {:?}", rot);
 
         // We put them in an array so we can get a raw pointer to this data.
         let ubos = [UniformBufferObject {
