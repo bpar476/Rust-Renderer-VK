@@ -14,7 +14,7 @@ mod instance;
 mod util;
 
 use ash::extensions::khr::{Surface, Win32Surface};
-use ash::vk::{self, DeviceQueueCreateInfo};
+use ash::vk::{self, DeviceQueueCreateInfo, MemoryMapFlags};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -287,6 +287,12 @@ impl HelloTriangleApplication {
             command_pool,
             graphics_queue,
             physical_device_memory_properties,
+        );
+
+        Self::create_texture_image(
+            &logical_device,
+            &physical_device_memory_properties,
+            "src/textures/texture.jpg".into(),
         );
 
         let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
@@ -1861,6 +1867,119 @@ impl HelloTriangleApplication {
 
     fn run(self, event_loop: EventLoop<()>) {
         self.main_loop(event_loop);
+    }
+
+    fn create_texture_image(
+        device: &ash::Device,
+        device_memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        image_path: String,
+    ) {
+        let mut image_object = image::open(image_path).unwrap(); // this function is slow in debug mode.
+
+        // Why flipv?
+        image_object = image_object.flipv();
+
+        let (image_width, image_height) = (image_object.width(), image_object.height());
+        let image_size =
+            (std::mem::size_of::<u8>() as u32 * image_width * image_height * 4) as vk::DeviceSize;
+        let image_data = match &image_object {
+            image::DynamicImage::ImageLuma8(_) | image::DynamicImage::ImageRgb8(_) => {
+                image_object.to_rgba8().into_raw()
+            }
+            image::DynamicImage::ImageLumaA8(_) | image::DynamicImage::ImageRgba8(_) => {
+                image_object.to_rgba8().into_raw()
+            }
+            image_type => panic!("Unsupported image type: {:?}", image_type),
+        };
+
+        if image_size <= 0 {
+            panic!("Failed to load texture image!")
+        }
+
+        let (staging_buffer, staging_mem) = Self::create_buffer(
+            device,
+            image_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            device_memory_properties,
+        );
+
+        unsafe {
+            let data = device
+                .map_memory(staging_mem, 0, image_size, MemoryMapFlags::empty())
+                .expect("Map memory for image staging buffer") as *mut u8;
+
+            data.copy_from_nonoverlapping(image_data.as_ptr(), image_data.len());
+            device.unmap_memory(staging_mem);
+        }
+
+        let (image, image_memory) = Self::create_image(
+            device,
+            image_width,
+            image_height,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            device_memory_properties,
+        );
+    }
+
+    fn create_image(
+        device: &ash::Device,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        tiling: vk::ImageTiling,
+        usage: vk::ImageUsageFlags,
+        memory_properties: vk::MemoryPropertyFlags,
+        device_memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    ) -> (vk::Image, vk::DeviceMemory) {
+        let image_ci = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(
+                vk::Extent3D::builder()
+                    .width(width)
+                    .height(height)
+                    .depth(1)
+                    .build(),
+            )
+            .mip_levels(1)
+            .array_layers(1)
+            .format(format)
+            .tiling(tiling)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .flags(vk::ImageCreateFlags::empty());
+
+        let image = unsafe {
+            device
+                .create_image(&image_ci, None)
+                .expect("Creating texture image")
+        };
+
+        let memory_requirements = unsafe { device.get_image_memory_requirements(image) };
+
+        let image_ai = vk::MemoryAllocateInfo::builder()
+            .allocation_size(memory_requirements.size)
+            .memory_type_index(Self::find_memory_type(
+                memory_requirements.memory_type_bits,
+                memory_properties,
+                device_memory_properties,
+            ));
+        let image_mem = unsafe {
+            let mem = device
+                .allocate_memory(&image_ai, None)
+                .expect("Allocating image memory");
+            device
+                .bind_image_memory(image, mem, 0)
+                .expect("Binding image memory");
+            mem
+        };
+
+        (image, image_mem)
     }
 }
 
