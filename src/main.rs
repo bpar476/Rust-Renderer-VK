@@ -189,6 +189,8 @@ struct HelloTriangleApplication {
     uniform_buffers_memory: Vec<vk::DeviceMemory>,
 
     start_time: Instant,
+    image: vk::Image,
+    image_memory: vk::DeviceMemory,
 }
 
 impl HelloTriangleApplication {
@@ -289,8 +291,10 @@ impl HelloTriangleApplication {
             physical_device_memory_properties,
         );
 
-        Self::create_texture_image(
+        let (image, image_memory) = Self::create_texture_image(
             &logical_device,
+            command_pool,
+            graphics_queue,
             &physical_device_memory_properties,
             "src/textures/texture.jpg".into(),
         );
@@ -382,6 +386,8 @@ impl HelloTriangleApplication {
             index_buffer_memory,
             uniform_buffers,
             uniform_buffers_memory,
+            image,
+            image_memory,
             start_time: Instant::now(),
         }
     }
@@ -1298,45 +1304,19 @@ impl HelloTriangleApplication {
         destination: vk::Buffer,
         size: vk::DeviceSize,
     ) {
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_pool(pool)
-            .command_buffer_count(1);
+        let command_buffer = begin_single_time_commands(device, pool);
 
-        let command_buffer = unsafe {
-            device
-                .allocate_command_buffers(&alloc_info)
-                .map(|b| b[0])
-                .expect("Allocating buffer copy command buffer")
-        };
-
-        let begin_info = vk::CommandBufferBeginInfo::builder()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         let copy_regions = [vk::BufferCopy::builder()
             .src_offset(0)
             .dst_offset(0)
             .size(size)
             .build()];
-        let buffers = [command_buffer];
-        let submit_info = vk::SubmitInfo::builder().command_buffers(&buffers);
+
         unsafe {
-            device
-                .begin_command_buffer(command_buffer, &begin_info)
-                .expect("begin recording buffer copy command buffer");
-
             device.cmd_copy_buffer(command_buffer, source, destination, &copy_regions);
-
-            device
-                .end_command_buffer(command_buffer)
-                .expect("End copy command buffer");
-
-            device
-                .queue_submit(queue, &[submit_info.build()], vk::Fence::null())
-                .expect("Submit buffer copy");
-            device.queue_wait_idle(queue).unwrap();
-
-            device.free_command_buffers(pool, &buffers)
         };
+
+        end_single_time_commands(device, pool, command_buffer, queue);
     }
 
     fn create_descriptor_pool(device: &ash::Device, size: usize) -> vk::DescriptorPool {
@@ -1871,9 +1851,11 @@ impl HelloTriangleApplication {
 
     fn create_texture_image(
         device: &ash::Device,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
         device_memory_properties: &vk::PhysicalDeviceMemoryProperties,
         image_path: String,
-    ) {
+    ) -> (vk::Image, vk::DeviceMemory) {
         let mut image_object = image::open(image_path).unwrap(); // this function is slow in debug mode.
 
         // Why flipv?
@@ -1923,6 +1905,42 @@ impl HelloTriangleApplication {
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             device_memory_properties,
         );
+
+        Self::transition_image_layout(
+            device,
+            queue,
+            command_pool,
+            image,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        );
+        Self::copy_buffer_to_image(
+            device,
+            command_pool,
+            queue,
+            staging_buffer,
+            image,
+            image_width,
+            image_height,
+        );
+
+        Self::transition_image_layout(
+            device,
+            queue,
+            command_pool,
+            image,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_mem, None);
+        }
+
+        (image, image_memory)
     }
 
     fn create_image(
@@ -1981,6 +1999,168 @@ impl HelloTriangleApplication {
 
         (image, image_mem)
     }
+
+    fn transition_image_layout(
+        device: &ash::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        image: vk::Image,
+        format: vk::Format,
+        old: vk::ImageLayout,
+        new: vk::ImageLayout,
+    ) {
+        let command_buffer = begin_single_time_commands(device, command_pool);
+
+        let (src_access_mask, dst_access_mask, src_stage, dst_stage): (
+            vk::AccessFlags,
+            vk::AccessFlags,
+            vk::PipelineStageFlags,
+            vk::PipelineStageFlags,
+        ) = match (old, new) {
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            _ => panic!("Unsupported layout transition"),
+        };
+
+        let barrier = vk::ImageMemoryBarrier::builder()
+            .old_layout(old)
+            .new_layout(new)
+            .src_access_mask(src_access_mask)
+            .dst_access_mask(dst_access_mask)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .build(),
+            );
+
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier.build()],
+            )
+        }
+
+        end_single_time_commands(device, command_pool, command_buffer, queue);
+    }
+
+    fn copy_buffer_to_image(
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        buffer: vk::Buffer,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+    ) {
+        let command_buffer = begin_single_time_commands(device, command_pool);
+
+        let region = vk::BufferImageCopy::builder()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .build(),
+            )
+            .image_offset(vk::Offset3D::builder().x(0).y(0).z(0).build())
+            .image_extent(
+                vk::Extent3D::builder()
+                    .width(width)
+                    .height(height)
+                    .depth(1)
+                    .build(),
+            );
+
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command_buffer,
+                buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region.build()],
+            );
+        }
+
+        end_single_time_commands(device, command_pool, command_buffer, queue);
+    }
+}
+
+fn begin_single_time_commands(device: &ash::Device, pool: vk::CommandPool) -> vk::CommandBuffer {
+    let ai = vk::CommandBufferAllocateInfo::builder()
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_pool(pool)
+        .command_buffer_count(1);
+
+    unsafe {
+        let cb = device
+            .allocate_command_buffers(&ai)
+            .expect("allocating command buffer")
+            .first()
+            .unwrap()
+            .clone();
+
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        device
+            .begin_command_buffer(cb, &begin_info)
+            .expect("Beginning command buyffer");
+
+        cb
+    }
+}
+
+fn end_single_time_commands(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    queue: vk::Queue,
+) {
+    unsafe {
+        device
+            .end_command_buffer(command_buffer)
+            .expect("Ending buffer")
+    };
+
+    let buffers = [command_buffer];
+    let submit_infos = [vk::SubmitInfo::builder().command_buffers(&buffers).build()];
+
+    unsafe {
+        device
+            .queue_submit(queue, &submit_infos, vk::Fence::null())
+            .expect("Submitting command buffer");
+        device
+            .queue_wait_idle(queue)
+            .expect("Waiting for queue to become idle after submitting command buffer");
+
+        device.free_command_buffers(command_pool, &buffers);
+    }
 }
 
 impl Drop for HelloTriangleApplication {
@@ -1991,6 +2171,8 @@ impl Drop for HelloTriangleApplication {
         self.debug_config = None;
 
         unsafe {
+            self.logical_device.destroy_image(self.image, None);
+            self.logical_device.free_memory(self.image_memory, None);
             self.logical_device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             self.logical_device.destroy_buffer(self.vertex_buffer, None);
