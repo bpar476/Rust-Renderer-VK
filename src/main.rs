@@ -191,6 +191,8 @@ struct HelloTriangleApplication {
     start_time: Instant,
     image: vk::Image,
     image_memory: vk::DeviceMemory,
+    texture_image_view: vk::ImageView,
+    texture_sampler: vk::Sampler,
 }
 
 impl HelloTriangleApplication {
@@ -257,7 +259,8 @@ impl HelloTriangleApplication {
             &queue_families,
         );
 
-        let swapchain_image_views = Self::create_image_views(&logical_device, &swapchain_data);
+        let swapchain_image_views =
+            Self::create_swapchain_image_views(&logical_device, &swapchain_data);
 
         let render_pass = Self::create_render_pass(&logical_device, swapchain_data.format);
 
@@ -299,6 +302,8 @@ impl HelloTriangleApplication {
             "src/textures/texture.jpg".into(),
         );
 
+        let texture_image_view = Self::create_texture_image_view(&logical_device, image);
+
         let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
             &instance,
             &logical_device,
@@ -307,6 +312,11 @@ impl HelloTriangleApplication {
             graphics_queue,
             physical_device_memory_properties,
         );
+
+        let physical_device_properties =
+            unsafe { instance.get_physical_device_properties(physical_device) };
+        let texture_sampler =
+            Self::create_texture_sampler(&logical_device, physical_device_properties);
 
         let (uniform_buffers, uniform_buffers_memory) = Self::create_uniform_buffers(
             &logical_device,
@@ -388,6 +398,8 @@ impl HelloTriangleApplication {
             uniform_buffers_memory,
             image,
             image_memory,
+            texture_image_view,
+            texture_sampler,
             start_time: Instant::now(),
         }
     }
@@ -481,6 +493,7 @@ impl HelloTriangleApplication {
                 && features.geometry_shader == 1
                 && supports_required_families
                 && swap_chain_adequate
+                && features.sampler_anisotropy == 1
         } else {
             false
         }
@@ -582,7 +595,9 @@ impl HelloTriangleApplication {
                     .build(),
             )
         }
-        let device_features = vk::PhysicalDeviceFeatures::builder().build();
+        let device_features = vk::PhysicalDeviceFeatures::builder()
+            .sampler_anisotropy(true)
+            .build();
 
         let create_infos = &queue_create_infos[..];
         let required_validation_layer_raw_names: Vec<CString> = VALIDATION_LAYERS
@@ -797,43 +812,14 @@ impl HelloTriangleApplication {
         }
     }
 
-    fn create_image_views(
+    fn create_swapchain_image_views(
         device: &ash::Device,
         swapchain_data: &SwapChainData,
     ) -> Vec<vk::ImageView> {
         swapchain_data
             .images
             .iter()
-            .map(|image| {
-                let ci = vk::ImageViewCreateInfo::builder()
-                    // TODO is copying bad here?
-                    .image(*image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(swapchain_data.format)
-                    .components(
-                        vk::ComponentMapping::builder()
-                            .r(vk::ComponentSwizzle::IDENTITY)
-                            .g(vk::ComponentSwizzle::IDENTITY)
-                            .b(vk::ComponentSwizzle::IDENTITY)
-                            .a(vk::ComponentSwizzle::IDENTITY)
-                            .build(),
-                    )
-                    // TODO look up what a subresource range is from khronos reference
-                    .subresource_range(
-                        vk::ImageSubresourceRange::builder()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .base_mip_level(0)
-                            .level_count(1)
-                            .base_array_layer(0)
-                            .layer_count(1)
-                            .build(),
-                    );
-                unsafe {
-                    device
-                        .create_image_view(&ci, None)
-                        .expect("Creating image view")
-                }
-            })
+            .map(|&image| Self::create_image_view(device, image, swapchain_data.format))
             .collect()
     }
 
@@ -1553,7 +1539,7 @@ impl HelloTriangleApplication {
         self.swapchain_data = swapchain_data;
 
         self.swapchain_image_views =
-            Self::create_image_views(&self.logical_device, &self.swapchain_data);
+            Self::create_swapchain_image_views(&self.logical_device, &self.swapchain_data);
 
         self.render_pass =
             Self::create_render_pass(&self.logical_device, self.swapchain_data.format);
@@ -2065,6 +2051,38 @@ impl HelloTriangleApplication {
         end_single_time_commands(device, command_pool, command_buffer, queue);
     }
 
+    fn create_image_view(
+        device: &ash::Device,
+        image: vk::Image,
+        format: vk::Format,
+    ) -> vk::ImageView {
+        let create_info = vk::ImageViewCreateInfo::builder()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .build(),
+            )
+            .components(vk::ComponentMapping {
+                r: vk::ComponentSwizzle::IDENTITY,
+                g: vk::ComponentSwizzle::IDENTITY,
+                b: vk::ComponentSwizzle::IDENTITY,
+                a: vk::ComponentSwizzle::IDENTITY,
+            });
+
+        unsafe {
+            device
+                .create_image_view(&create_info, None)
+                .expect("Creating texture image view")
+        }
+    }
+
     fn copy_buffer_to_image(
         device: &ash::Device,
         command_pool: vk::CommandPool,
@@ -2108,6 +2126,38 @@ impl HelloTriangleApplication {
         }
 
         end_single_time_commands(device, command_pool, command_buffer, queue);
+    }
+
+    fn create_texture_image_view(device: &ash::Device, image: vk::Image) -> vk::ImageView {
+        Self::create_image_view(device, image, vk::Format::R8G8B8A8_SRGB)
+    }
+
+    fn create_texture_sampler(
+        device: &ash::Device,
+        physical_device_properties: vk::PhysicalDeviceProperties,
+    ) -> vk::Sampler {
+        let create_info = vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(true)
+            .max_anisotropy(physical_device_properties.limits.max_sampler_anisotropy)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0f32)
+            .min_lod(0f32)
+            .max_lod(0f32);
+
+        unsafe {
+            device
+                .create_sampler(&create_info, None)
+                .expect("Creating texture sampler")
+        }
     }
 }
 
@@ -2171,6 +2221,10 @@ impl Drop for HelloTriangleApplication {
         self.debug_config = None;
 
         unsafe {
+            self.logical_device
+                .destroy_sampler(self.texture_sampler, None);
+            self.logical_device
+                .destroy_image_view(self.texture_image_view, None);
             self.logical_device.destroy_image(self.image, None);
             self.logical_device.free_memory(self.image_memory, None);
             self.logical_device
