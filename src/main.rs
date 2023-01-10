@@ -1698,10 +1698,10 @@ impl HelloTriangleApplication {
                 vk::Fence::null(),
             ) {
                 Ok((idx, _)) => (idx as usize, false),
-                // Ok((_, false)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                //     self.recreate_swapchain();
-                //     (0 as usize, true)
-                // }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.recreate_swapchain();
+                    (0 as usize, true)
+                }
                 Err(_) => panic!("Failed to acquire swapchain image"),
             }
         };
