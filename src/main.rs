@@ -64,6 +64,7 @@ struct UniformBufferObject {
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 3],
+    tex_coord: [f32; 2],
 }
 
 impl Vertex {
@@ -75,7 +76,7 @@ impl Vertex {
             .build()
     }
 
-    fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+    fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 3] {
         let position_binding = vk::VertexInputAttributeDescription::builder()
             .binding(0)
             .location(0)
@@ -88,8 +89,14 @@ impl Vertex {
             .format(vk::Format::R32G32B32_SFLOAT)
             .offset(offset_of!(Self, color) as u32)
             .build();
+        let tex_coord_binding = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(2)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(offset_of!(Self, tex_coord) as u32)
+            .build();
 
-        [position_binding, color_binding]
+        [position_binding, color_binding, tex_coord_binding]
     }
 }
 
@@ -97,18 +104,22 @@ const QUAD_VERTICES: [Vertex; 4] = [
     Vertex {
         pos: [-0.5, -0.5],
         color: [1.0, 0.0, 0.0],
+        tex_coord: [1.0, 0.0],
     },
     Vertex {
         pos: [0.5, -0.5],
         color: [0.0, 1.0, 0.0],
+        tex_coord: [0.0, 0.0],
     },
     Vertex {
         pos: [0.5, 0.5],
         color: [0.0, 0.0, 1.0],
+        tex_coord: [0.0, 1.0],
     },
     Vertex {
         pos: [-0.5, 0.5],
         color: [1.0, 1.0, 1.0],
+        tex_coord: [1.0, 1.0],
     },
 ];
 
@@ -336,6 +347,8 @@ impl HelloTriangleApplication {
             &logical_device,
             &descriptor_sets,
             &uniform_buffers,
+            texture_image_view,
+            texture_sampler,
             swapchain_image_views.len(),
         );
 
@@ -880,8 +893,16 @@ impl HelloTriangleApplication {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX);
+        let tex_sampler_layout_binding = vk::DescriptorSetLayoutBinding::builder()
+            .binding(1)
+            .descriptor_count(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
 
-        let bindings = [ubo_layout_binding.build()];
+        let bindings = [
+            ubo_layout_binding.build(),
+            tex_sampler_layout_binding.build(),
+        ];
         let ci = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
         unsafe {
             device
@@ -1306,10 +1327,16 @@ impl HelloTriangleApplication {
     }
 
     fn create_descriptor_pool(device: &ash::Device, size: usize) -> vk::DescriptorPool {
-        let pool_sizes = [vk::DescriptorPoolSize::builder()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(size as u32)
-            .build()];
+        let pool_sizes = [
+            vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(size as u32)
+                .build(),
+            vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(size as u32)
+                .build(),
+        ];
 
         // We can set a flag that allows us to free descriptor sets, but we won't need that
         let ci = vk::DescriptorPoolCreateInfo::builder()
@@ -1333,7 +1360,7 @@ impl HelloTriangleApplication {
 
         // Every frame uses the same descriptor layout
         for _ in 0..size {
-            layouts.push(layout_template.clone());
+            layouts.push(layout_template);
         }
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(pool)
@@ -1350,6 +1377,8 @@ impl HelloTriangleApplication {
         device: &ash::Device,
         descriptor_sets: &Vec<vk::DescriptorSet>,
         uniform_buffers: &Vec<vk::Buffer>,
+        texture_image_view: vk::ImageView,
+        texture_sampler: vk::Sampler,
         size: usize,
     ) {
         for i in 0..size {
@@ -1359,13 +1388,28 @@ impl HelloTriangleApplication {
                 .range(mem::size_of::<UniformBufferObject>() as u64)
                 .build()];
 
-            let write = [vk::WriteDescriptorSet::builder()
-                .dst_set(descriptor_sets[i])
-                .dst_binding(0)
-                .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&bi)
+            let image_info = [vk::DescriptorImageInfo::builder()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(texture_image_view)
+                .sampler(texture_sampler)
                 .build()];
+
+            let write = [
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(descriptor_sets[i])
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&bi)
+                    .build(),
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(descriptor_sets[i])
+                    .dst_binding(1)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&image_info)
+                    .build(),
+            ];
 
             unsafe { device.update_descriptor_sets(&write, &[]) };
         }
@@ -1580,6 +1624,8 @@ impl HelloTriangleApplication {
             &self.logical_device,
             &self.descriptor_sets,
             &self.uniform_buffers,
+            self.texture_image_view,
+            self.texture_sampler,
             self.swapchain_image_views.len(),
         );
 
